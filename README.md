@@ -1,4 +1,4 @@
-# Usage
+### Usage
 
 Running the caching service if you have nix package manager installed:
 
@@ -18,7 +18,7 @@ To safely stop the process:
 
     Fetching.stop(); close(cache_storage); exit()
 
-# API request examples
+### API requests
 
 Read `app.jl` for list of all supported arguments.
 
