@@ -1,3 +1,5 @@
+Primal’s caching service for Nostr connects to the specified set of relays, collects all events in real time, stores them locally, and makes them available to nostr clients through a web socket-based API.
+
 ### Usage
 
 Running the caching service if you have nix package manager installed:
