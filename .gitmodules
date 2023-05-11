@@ -1,0 +1,3 @@
+[submodule "bech32"]
+	path = bech32
+	url = https://github.com/sipa/bech32

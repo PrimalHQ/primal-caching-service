@@ -1,0 +1,10 @@
+wss://relay.nostr.com.au
+wss://eden.nostr.land
+wss://nostr.milou.lol
+wss://puravida.nostr.land
+wss://nostr.wine
+wss://nostr.inosta.cc
+wss://nostr-pub.semisol.dev
+wss://relay.orangepill.dev
+wss://relay.nostrati.com
+wss://atlas.nostr.land
