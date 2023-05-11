@@ -6,7 +6,7 @@ Running the caching service if you have nix package manager installed:
 
 Running the caching service if you have docker installed:
 
-   docker run -it --rm -v `pwd`:`pwd` -w `pwd` -p 8801:8801 -e PRIMALSERVER_HOST=0.0.0.0 nixos/nix nix --extra-experimental-features 'nix-command flakes' develop -c sh -c '$start_primal_caching_service' 
+    docker run -it --rm -v `pwd`:`pwd` -w `pwd` -p 8801:8801 -e PRIMALSERVER_HOST=0.0.0.0 nixos/nix nix --extra-experimental-features 'nix-command flakes' develop -c sh -c '$start_primal_caching_service' 
 
 Log files for fetched messages and sqlite database files will be located in `var` sub-directory by default.
 
