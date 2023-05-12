@@ -227,14 +227,18 @@ function user_infos(est::DB.CacheStorage; pubkeys::Vector)
     res
 end
 
-function events(est::DB.CacheStorage; event_ids::Vector)
+function events(est::DB.CacheStorage; event_ids::Vector, extended_response::Bool=false)
     event_ids = [eid isa Nostr.EventId ? eid : Nostr.EventId(eid) for eid in event_ids]
 
-    res = [] |> ThreadSafe
-    @threads for eid in event_ids 
-        eid in est.events && push!(res, est.events[eid])
+    if !extended_response
+        res = [] |> ThreadSafe
+        @threads for eid in event_ids 
+            eid in est.events && push!(res, est.events[eid])
+        end
+        res.wrapped
+    else
+        response_messages_for_posts(est, event_ids)
     end
-    res.wrapped
 end
 
 function user_profile(est::DB.CacheStorage; pubkey)
