@@ -1,3 +1,5 @@
+#module DB
+
 import SQLite, DBInterface, JSON
 
 struct SQLiteConn <: DBConn
@@ -155,6 +157,7 @@ sqltype(::Type{ShardedSqliteDict{K, V}}, ::Type{Nostr.Event}) where {K, V} = "te
 sqltype(::Type{ShardedSqliteDict{K, V}}, ::Type{Tuple{Nostr.PubKeyId, Nostr.EventId}}) where {K, V} = "blob"
 
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Nothing}) where {K, V} = DBConversionFuncs(identity, identity)
+db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Missing}) where {K, V} = DBConversionFuncs(identity, identity)
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Bool}) where {K, V} = DBConversionFuncs(x->Int(x), x->Bool(x))
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Int}) where {K, V} = DBConversionFuncs(identity, identity)
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Float64}) where {K, V} = DBConversionFuncs(identity, identity)
@@ -162,7 +165,7 @@ db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{String}) where {K, V
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Symbol}) where {K, V} = DBConversionFuncs(x->string(x), x->Symbol(x))
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Nostr.EventId}) where {K, V} = DBConversionFuncs(eid->collect(eid.hash), eid->Nostr.EventId(eid))
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Nostr.PubKeyId}) where {K, V} = DBConversionFuncs(pk->collect(pk.pk), pk->Nostr.PubKeyId(pk))
-db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Nostr.Event}) where {K, V} = DBConversionFuncs(JSON.json, e->Nostr.dict2event(JSON.parse(e)))
+db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Nostr.Event}) where {K, V} = DBConversionFuncs(JSON.json, e->Nostr.Event(JSON.parse(e)))
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Tuple{Nostr.PubKeyId, Nostr.EventId}}) where {K, V} = DBConversionFuncs(p->vcat(collect(p[1].pk), collect(p[2].hash)),
                                                                                                                                     p->(Nostr.PubKeyId(p[1:32]), Nostr.EventId(p[33:64])))
 

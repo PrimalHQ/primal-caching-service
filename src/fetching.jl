@@ -174,7 +174,7 @@ function update_fetchers!(relay_urls; wait_to_stop=false, since=0)
                             fetcher.filename = message_log_filename(relay_url, date)
                             isnothing(flog[]) || close(flog[])
                             flog[] = open(fetcher.filename, "a")
-                            println("fetching messages for $relay_url to file $(fetcher.filename)")
+                            println("fetching messages from $relay_url to file $(fetcher.filename)")
                         end
 
                         println(flog[], msgjson)
@@ -250,22 +250,31 @@ function sanitize_uri(uri::AbstractString)
     URIs.URI(u; host, path, port)
 end
 
+function sanitize_valid_relay_url(url)
+    (isempty(url) || endswith(url, ".onion")) && return 
+    url = split(strip(url), '\n')[1]
+    local u = sanitize_uri(url) 
+    URIs.isvalid(u) || return 
+    occursin(':', u.host) && return 
+    startswith(u.host, '[') && return 
+    u.host in ["localhost", "127.0.0.1"] && return 
+    u
+end
+
 function load_relays()
+    empty!(relays)
     for url in readlines("relays-active.txt") # these have sent us an event at least once in the past
         push!(relays, url)
     end
     for url in vcat([readlines(fn)
                      for fn in ["relays.txt",
                                 "relays-paid.txt",
-                                "relays-mined-from-events.txt"
+                                "relays-mined-from-events.txt",
+                                "relays-mined-from-contact-lists.txt",
                                ]]...)
-        (isempty(url) || endswith(url, ".onion")) && continue
-        local u = sanitize_uri(url) 
-        URIs.isvalid(u) || continue
-        occursin(':', u.host) && continue
-        startswith(u.host, '[') && continue
-        u.host in ["localhost", "127.0.0.1"] && continue
-        push!(relays, string(u))
+        if !isnothing(local u = try sanitize_valid_relay_url(url) catch _ end)
+            push!(relays, string(u))
+        end
     end
 end
 

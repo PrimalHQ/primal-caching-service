@@ -1,3 +1,5 @@
+#module DB
+
 using DataStructures: Accumulator, CircularBuffer, SortedDict
 using UnicodePlots: barplot
 using BenchmarkTools: prettytime
@@ -87,6 +89,7 @@ stat_names = Set([:msg,
                   :tags,
                   :pubnotes,
                   :directmsgs,
+                  :eventdeletions,
                   :reactions,
                   :replies,
                   :mentions,
@@ -97,6 +100,8 @@ stat_names = Set([:msg,
                   :satszapped,
                   :eventhooks,
                   :eventhooksexecuted,
+                  :scheduledhooks,
+                  :scheduledhooksexecuted,
                  ])
 
 function load_stats(stats_filename::String)
@@ -207,6 +212,9 @@ Base.@kwdef struct CacheStorage <: EventStorage
 
     tidcnts = Accumulator{Int, Int}() |> ThreadSafe
 
+    periodic_task_running = Ref(false)
+    periodic_task = Ref{Union{Nothing, Task}}(nothing)
+
     event_ids      = ShardedSqliteSet(Nostr.EventId, "$(commons.directory)/db/event_ids"; commons.dbargs...)
     events         = ShardedSqliteDict{Nostr.EventId, Nostr.Event}("$(commons.directory)/db/events"; commons.dbargs...)
     event_created_at = ShardedSqliteDict{Nostr.EventId, Int}("$(commons.directory)/db/event_created_at"; commons.dbargs...,
@@ -286,10 +294,68 @@ Base.@kwdef struct CacheStorage <: EventStorage
                                                   )",
                                                  "create index if not exists kv_event_id on kv (event_id asc)"])
 
+    scheduled_hooks = SqliteDict(Int, String, "$(commons.directory)/db/scheduled_hooks"; commons.dbargs...,
+                                 init_queries=["create table if not exists kv (
+                                                  execute_at not null,
+                                                  funcall text not null
+                                               )",
+                                               "create index if not exists kv_execute_at on kv (execute_at asc)"])
+
+    event_pubkey_actions = ShardedSqliteSet(Nostr.EventId, "$(commons.directory)/db/event_pubkey_actions"; commons.dbargs...,
+                                            init_queries=["create table if not exists kv (
+                                                             event_id blob not null,
+                                                             pubkey blob not null,
+                                                             created_at int not null,
+                                                             updated_at int not null,
+                                                             replied int not null,
+                                                             liked int not null,
+                                                             reposted int not null,
+                                                             zapped int not null,
+                                                             primary key (event_id, pubkey)
+                                                          )",
+                                                          "create index if not exists kv_event on kv (event_id asc)",
+                                                          "create index if not exists kv_pubkey on kv (pubkey asc)",
+                                                          "create index if not exists kv_created_at on kv (created_at desc)",
+                                                          "create index if not exists kv_updated_at on kv (updated_at desc)",
+                                                         ])
+
+    deleted_events = ShardedSqliteDict{Nostr.EventId, Nostr.EventId}("$(commons.directory)/db/deleted_events"; commons.dbargs...,
+                                                                     keycolumn="event_id", valuecolumn="deletion_event_id")
+
+    mute_list = ShardedSqliteDict{Nostr.PubKeyId, Nostr.EventId}("$(commons.directory)/db/mute_list"; commons.dbargs...)
+
+    pubkey_directmsgs = ShardedSqliteSet(Nostr.PubKeyId, "$(commons.directory)/db/pubkey_directmsgs"; commons.dbargs...,
+                                         table="pubkey_directmsgs", keycolumn="receiver", valuecolumn="event_id",
+                                         init_queries=["create table if not exists pubkey_directmsgs (
+                                                          receiver blob not null,
+                                                          sender blob not null,
+                                                          created_at integer not null,
+                                                          event_id blob not null
+                                                       )",
+                                                       "create index if not exists pubkey_directmsgs_receiver   on pubkey_directmsgs (receiver asc)",
+                                                       "create index if not exists pubkey_directmsgs_sender     on pubkey_directmsgs (sender asc)",
+                                                       "create index if not exists pubkey_directmsgs_receiver_event_id on pubkey_directmsgs (receiver asc, event_id asc)",
+                                                       "create index if not exists pubkey_directmsgs_created_at on pubkey_directmsgs (created_at desc)"])
+
+    pubkey_directmsgs_cnt = ShardedSqliteSet(Nostr.PubKeyId, "$(commons.directory)/db/pubkey_directmsgs_cnt"; commons.dbargs...,
+                                             table="pubkey_directmsgs_cnt", keycolumn="receiver", valuecolumn="cnt",
+                                             init_queries=["create table if not exists pubkey_directmsgs_cnt (
+                                                              receiver blob not null,
+                                                              sender blob,
+                                                              cnt integer not null,
+                                                              latest_at integer not null,
+                                                              latest_event_id blob not null
+                                                           )",
+                                                           "create index if not exists pubkey_directmsgs_cnt_receiver on pubkey_directmsgs_cnt (receiver asc)",
+                                                           "create index if not exists pubkey_directmsgs_cnt_sender   on pubkey_directmsgs_cnt (sender asc)",
+                                                           "create index if not exists pubkey_directmsgs_cnt_receiver_sender on pubkey_directmsgs_cnt (receiver asc, sender asc)",
+                                                          ])
+    pubkey_directmsgs_cnt_lock = ReentrantLock()
+
     ext = Ref{Any}(nothing)
 end
 
-function Base.close(est::EventStorage)
+function close_conns(est)
     for a in propertynames(est)
         v = getproperty(est, a)
         if v isa ShardedDBDict
@@ -297,6 +363,18 @@ function Base.close(est::EventStorage)
             close(v)
         end
     end
+end
+
+function Base.close(est::DeduplicatedEventStorage)
+    close_conns(est)
+    close_conns(est.commons)
+end
+
+function Base.close(est::CacheStorage)
+    close_conns(est)
+    close_conns(est.commons)
+    est.periodic_task_running[] = false
+    wait(est.periodic_task[])
 end
 
 function Base.delete!(est::EventStorage)
@@ -327,9 +405,27 @@ function event_hook(est::CacheStorage, eid::Nostr.EventId, funcall::Tuple)
     incr(est, :eventhooks)
 end
 
+function scheduled_hook_execute(est::CacheStorage, funcall::Tuple)
+    catch_exception(est, funcall) do
+        funcname, args... = funcall
+        eval(Symbol(funcname))(est, args...)
+        incr(est, :scheduledhooksexecuted)
+    end
+end
+
+function schedule_hook(est::CacheStorage, execute_at::Int, funcall::Tuple)
+    if execute_at <= time()
+        scheduled_hook_execute(est, funcall)
+    else
+        exec(est.scheduled_hooks, @sql("insert into kv (execute_at, funcall) values (?1, ?2)"), (execute_at, JSON.json(funcall)))
+    end
+    incr(est, :scheduledhooks)
+end
+
 function track_user_stats(body::Function, est::CacheStorage, pubkey::Nostr.PubKeyId)
     function isuser()
         pubkey in est.meta_data && pubkey in est.contact_lists && 
+        est.contact_lists[pubkey] in est.events &&
         length([t for t in est.events[est.contact_lists[pubkey]].tags
                 if length(t.fields) >= 2 && t.fields[1] == "p"]) > 0
     end
@@ -340,6 +436,49 @@ function track_user_stats(body::Function, est::CacheStorage, pubkey::Nostr.PubKe
     elseif  isuser_pre && !isuser_post; incr(est, :users; by=-1)
     end
 end
+
+function event_pubkey_action(est::CacheStorage, eid::Nostr.EventId, pubkey::Nostr.PubKeyId, action::Symbol)
+    exe(est.event_pubkey_actions, @sql("insert or ignore into kv (event_id, pubkey, created_at, updated_at, replied, liked, reposted, zapped) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"), 
+        eid, pubkey, trunc(Int, time()), 0, false, false, false, false)
+    exe(est.event_pubkey_actions, "update kv set $(action) = true, updated_at = ?3 where event_id = ?1 and pubkey = ?2", 
+        eid, pubkey, trunc(Int, time()))
+end
+
+function zap_sender(zap_receipt::Nostr.Event)
+    for tag in zap_receipt.tags
+        if length(tag.fields) >= 2 && tag.fields[1] == "description"
+            return Nostr.PubKeyId(JSON.parse(tag.fields[2])["pubkey"])
+        end
+    end
+    error("invalid zap receipt event")
+end
+
+function parse_bolt11(b::String)
+    if startswith(b, "lnbc")
+        amount_digits = Char[]
+        unit = nothing
+        for i in 5:length(b)
+            c = b[i]
+            if isdigit(c)
+                push!(amount_digits, c)
+            else
+                unit = c
+                break
+            end
+        end
+        amount_sats = parse(Int, join(amount_digits)) * 100_000_000
+        if     unit == 'm'; amount_sats = amount_sats ÷ 1_000
+        elseif unit == 'u'; amount_sats = amount_sats ÷ 1_000_000
+        elseif unit == 'n'; amount_sats = amount_sats ÷ 1_000_000_000
+        elseif unit == 'p'; amount_sats = amount_sats ÷ 1_000_000_000_000
+        end
+        amount_sats
+    else
+        nothing
+    end
+end
+
+MAX_SATSZAPPED = Ref(1_000_000)
 
 re_hashref = r"\#\[([0-9]*)\]"
 re_mention = r"\bnostr:((note|npub|naddr|nevent|nprofile)1\w+)\b"
@@ -360,14 +499,8 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event)
     for m in eachmatch(re_mention, e.content)
         s = m.captures[1]
         catch_exception(est, e, m) do
-            if !isnothing(local ty = 
-                          if     startswith(s, "note") || startswith(s, "nevent"); "e"
-                          elseif startswith(s, "npub") || startswith(s, "naddr") || startswith(s, "nprofile"); "p"
-                          else; nothing
-                          end)
-                if !isnothing(local id = Nostr.bech32_decode(s))
-                    push!(mentiontags, Nostr.TagAny([ty, bytes2hex(id)]))
-                end
+            if !isnothing(local id = try Nostr.bech32_decode(s) catch _ end)
+                push!(mentiontags, Nostr.TagAny([id isa Nostr.PubKeyId ? "p" : "e", Nostr.hex(id)]))
             end
         end
     end
@@ -536,7 +669,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
             is_pubkey_event = true
             for tag in e.tags
                 if length(tag.fields) >= 2 && tag.fields[1] == "e"
-                    is_reply = true
+                    is_reply = !(length(tag.fields) >= 4 && tag.fields[4] == "mention")
                     break
                 end
             end
@@ -567,7 +700,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                     if haskey(est.contact_lists, e.pubkey)
                         for tag in est.events[est.contact_lists[e.pubkey]].tags
                             if length(tag.fields) >= 2 && tag.fields[1] == "p"
-                                follow_pubkey = try Nostr.PubKeyId(hex2bytes(tag.fields[2])) catch _ continue end
+                                follow_pubkey = try Nostr.PubKeyId(tag.fields[2]) catch _ continue end
                                 push!(old_follows, follow_pubkey)
                             end
                         end
@@ -578,7 +711,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                     new_follows = Set{Nostr.PubKeyId}()
                     for tag in e.tags
                         if length(tag.fields) >= 2 && tag.fields[1] == "p"
-                            follow_pubkey = try Nostr.PubKeyId(hex2bytes(tag.fields[2])) catch _ continue end
+                            follow_pubkey = try Nostr.PubKeyId(tag.fields[2]) catch _ continue end
                             push!(new_follows, follow_pubkey)
                         end
                     end
@@ -593,10 +726,10 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                     end
                     for follow_pubkey in old_follows
                         follow_pubkey in new_follows && continue
-                                exe(est.pubkey_followers, @sql("delete from kv where pubkey = ?1 and follower_pubkey = ?2 and follower_contact_list_event_id = ?3"),
-                                    follow_pubkey, e.pubkey, est.contact_lists[e.pubkey])
-                                exe(est.pubkey_followers_cnt, @sql("update kv set value = value - 1 where key = ?1"),
-                                    follow_pubkey)
+                        exe(est.pubkey_followers, @sql("delete from kv where pubkey = ?1 and follower_pubkey = ?2 and follower_contact_list_event_id = ?3"),
+                            follow_pubkey, e.pubkey, est.contact_lists[e.pubkey])
+                        exe(est.pubkey_followers_cnt, @sql("update kv set value = value - 1 where key = ?1"),
+                            follow_pubkey)
                         ext_user_unfollowed(est, e, follow_pubkey)
                     end
                 end
@@ -610,10 +743,11 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
             incr(est, :reactions)
             for tag in e.tags
                 if tag.fields[1] == "e"
-                    if !isnothing(local eid = try Nostr.EventId(hex2bytes(tag.fields[2])) catch _ end)
+                    if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
                         c = e.content
                         if isempty(c) || c[1] in "🤙+❤️"
                             event_hook(est, eid, (:event_stats_cb, :likes, +1))
+                            event_pubkey_action(est, eid, e.pubkey, :liked)
                             ext_reaction(est, e, eid)
                         end
                     end
@@ -634,26 +768,44 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
             parent_eid = nothing
             for tag in e.tags
                 if length(tag.fields) >= 2 && tag.fields[1] == "e"
-                    try parent_eid = Nostr.EventId(hex2bytes(tag.fields[2])) catch _ end
+                    try parent_eid = Nostr.EventId(tag.fields[2]) catch _ end
                 end
             end
             if !isnothing(parent_eid)
                 incr(est, :replies)
                 event_hook(est, parent_eid, (:event_stats_cb, :replies, +1))
-                ext_reply(est, e, parent_eid)
                 exe(est.event_replies, @sql("insert into kv (event_id, reply_event_id, reply_created_at) values (?1, ?2, ?3)"),
                     parent_eid, e.id, e.created_at)
+                event_pubkey_action(est, parent_eid, e.pubkey, :replied)
                 est.event_thread_parents[e.id] = parent_eid
+                ext_reply(est, e, parent_eid)
             end
 
         elseif e.kind == Int(Nostr.DIRECT_MESSAGE)
-            incr(est, :directmsgs)
+            import_directmsg(est, e)
+
+        elseif e.kind == Int(Nostr.EVENT_DELETION)
+            for tag in e.tags
+                if length(tag.fields) >= 2 && tag.fields[1] == "e"
+                    if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
+                        if eid in est.events
+                            de = est.events[eid]
+                            if de.pubkey == e.pubkey
+                                incr(est, :eventdeletions)
+                                est.deleted_events[eid] = e.id
+                                ext_event_deletion(est, e, eid)
+                            end
+                        end
+                    end
+                end
+            end
         elseif e.kind == Int(Nostr.REPOST)
             incr(est, :reposts)
             for tag in e.tags
                 if tag.fields[1] == "e"
-                    if !isnothing(local eid = try Nostr.EventId(hex2bytes(tag.fields[2])) catch _ end)
+                    if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
                         event_hook(est, eid, (:event_stats_cb, :reposts, +1))
+                        event_pubkey_action(est, eid, e.pubkey, :reposted)
                         ext_repost(est, e, eid)
                         break
                     end
@@ -667,28 +819,14 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
             for tag in e.tags
                 if length(tag.fields) >= 2
                     if tag.fields[1] == "e"
-                        parent_eid = try Nostr.EventId(hex2bytes(tag.fields[2])) catch _ end
+                        parent_eid = try Nostr.EventId(tag.fields[2]) catch _ end
                     elseif tag.fields[1] == "p"
-                        zapped_pk = try Nostr.PubKeyId(hex2bytes(tag.fields[2])) catch _ end
+                        zapped_pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end
                     elseif tag.fields[1] == "bolt11"
                         b = tag.fields[2]
-                        if startswith(b, "lnbc")
-                            amount_digits = Char[]
-                            unit = nothing
-                            for i in 5:length(b)
-                                c = b[i]
-                                if isdigit(c)
-                                    push!(amount_digits, c)
-                                else
-                                    unit = c
-                                    break
-                                end
-                            end
-                            amount_sats = parse(Int, join(amount_digits)) * 100_000_000
-                            if     unit == 'm'; amount_sats = amount_sats ÷ 1_000
-                            elseif unit == 'u'; amount_sats = amount_sats ÷ 1_000_000
-                            elseif unit == 'n'; amount_sats = amount_sats ÷ 1_000_000_000
-                            elseif unit == 'p'; amount_sats = amount_sats ÷ 1_000_000_000_000
+                        if !isnothing(local amount = parse_bolt11(b))
+                            if amount <= MAX_SATSZAPPED[]
+                                amount_sats = amount
                             end
                         end
                     end
@@ -700,11 +838,14 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                 if !isnothing(parent_eid)
                     event_hook(est, parent_eid, (:event_stats_cb, :zaps, +1))
                     ext_zap(est, e, parent_eid, amount_sats)
+                    event_pubkey_action(est, parent_eid, zap_sender(e), :zapped)
                 end
                 if !isnothing(zapped_pk)
                     ext_pubkey_zap(est, e, zapped_pk, amount_sats)
                 end
             end
+        elseif e.kind == Int(Nostr.MUTE_LIST)
+            est.mute_list[e.pubkey] = e.id
         end
     end
 
@@ -715,6 +856,40 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
     exe(est.event_hooks, @sql("delete from kv where event_id = ?1"), e.id)
 
     return true
+end
+
+function import_directmsg(est::CacheStorage, e::Nostr.Event)
+    incr(est, :directmsgs)
+    for tag in e.tags
+        if length(tag.fields) >= 2 && tag.fields[1] == "p"
+            if !isnothing(local receiver = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                lock(est.pubkey_directmsgs_cnt_lock) do
+                    isempty(exe(est.pubkey_directmsgs, @sql("select 1 from pubkey_directmsgs indexed by pubkey_directmsgs_receiver_event_id where receiver = ?1 and event_id = ?2 limit 1"), receiver, e.id)) &&
+                        exe(est.pubkey_directmsgs, @sql("insert into pubkey_directmsgs values (?1, ?2, ?3, ?4)"), receiver, e.pubkey, e.created_at, e.id)
+
+                    for sender in [nothing, e.pubkey]
+                        if isempty(exe(est.pubkey_directmsgs_cnt, @sql("select 1 from pubkey_directmsgs_cnt indexed by pubkey_directmsgs_cnt_receiver_sender where receiver is ?1 and sender is ?2 limit 1"), receiver, sender))
+                            exe(est.pubkey_directmsgs_cnt, @sql("insert into pubkey_directmsgs_cnt values (?1, ?2, ?3, ?4, ?5)"), receiver, sender, 0, e.created_at, e.id)
+                        end
+                        exe(est.pubkey_directmsgs_cnt, @sql("update pubkey_directmsgs_cnt indexed by pubkey_directmsgs_cnt_receiver_sender set cnt = cnt + ?3 where receiver is ?1 and sender is ?2"), receiver, sender, +1)
+                        prev_latest_at = exe(est.pubkey_directmsgs_cnt, @sql("select latest_at from pubkey_directmsgs_cnt indexed by pubkey_directmsgs_cnt_receiver_sender where receiver is ?1 and sender is ?2 limit 1"), receiver, sender)[1][1]
+                        if e.created_at >= prev_latest_at
+                            exe(est.pubkey_directmsgs_cnt, @sql("update pubkey_directmsgs_cnt indexed by pubkey_directmsgs_cnt_receiver_sender set latest_at = ?3, latest_event_id = ?4 where receiver is ?1 and sender is ?2"), receiver, sender, e.created_at, e.id)
+                        end
+                    end
+                end
+
+                break
+            end
+        end
+    end
+end
+
+function run_scheduled_hooks(est::CacheStorage)
+    for (rowid, funcall) in exec(est.scheduled_hooks, @sql("select rowid, funcall from kv where execute_at <= ?1"), (trunc(Int, time()),))
+        scheduled_hook_execute(est, Tuple(JSON.parse(funcall)))
+        exec(est.scheduled_hooks, @sql("delete from kv where rowid = ?1"), (rowid,))
+    end
 end
 
 function prune(deduped_storage::DeduplicatedEventStorage, cache_storage::CacheStorage, keep_after::Int)
@@ -821,6 +996,18 @@ function init(est::CacheStorage, running=Ref(true))
     init(est.commons, running)
 
     ext_init(est)
+
+    est.periodic_task_running[] = true
+    est.periodic_task[] = errormonitor(@async while est.periodic_task_running[]
+                                           catch_exception(est, :periodic) do
+                                               periodic(est)
+                                           end
+                                           Utils.active_sleep(60.0, est.periodic_task_running)
+                                       end)
+end
+
+function periodic(est::CacheStorage)
+    run_scheduled_hooks(est)
 end
 
 function import_to_storage(
@@ -918,7 +1105,7 @@ function extract_event_id(msg::String)
             eid = try
                 eidhex = msg[r1[end]+1:findnext("\"", msg, r1[end]+1)[1]-1]
                 Nostr.EventId(eidhex)
-            catch _ nothing end
+            catch _ end
             if !isnothing(eid)
                 return eid
             end
@@ -990,6 +1177,7 @@ function ext_user_unfollowed(est::CacheStorage, e, follow_pubkey) end
 function ext_reaction(est::CacheStorage, e, eid) end
 function ext_text_note(est::CacheStorage, e) end
 function ext_reply(est::CacheStorage, e, parent_eid) end
+function ext_event_deletion(est::CacheStorage, e, eid) end
 function ext_repost(est::CacheStorage, e, eid) end
 function ext_zap(est::CacheStorage, e, parent_eid, amount_sats) end
 function ext_pubkey_zap(est::CacheStorage, e, zapped_pk, amount_sats) end

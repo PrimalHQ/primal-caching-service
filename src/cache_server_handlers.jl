@@ -95,7 +95,7 @@ function initial_filter_handler(ws::WebSocket, subid, filters)
             local filt = filt["cache"]
             try
                 funcall = Symbol(filt[1])
-                if !(funcall in [:net_stats, :notifications, :notification_counts])
+                if !(funcall in [:net_stats, :notifications, :notification_counts, :directmsg_count])
                     @assert funcall in App().exposed_functions
                     kwargs = [Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
                     kwargs_extra = Pair{Symbol, Any}[]
@@ -107,7 +107,7 @@ function initial_filter_handler(ws::WebSocket, subid, filters)
                                           lock(requests_per_period) do requests_per_period
                                               requests_per_period[] += 1
                                           end
-                                          (; funcall, kwargs, ws=string(ws_id))
+                                          (; funcall, kwargs, ws=string(ws_id), subid)
                                       end) do
                         fetch(Threads.@spawn Base.invokelatest(getproperty(App(), funcall), est(); kwargs..., kwargs_extra...))
                     end |> sendres
@@ -151,11 +151,12 @@ netstats_task = Ref{Any}(nothing)
 netstats_running = Ref(true)
 NETSTATS_RATE = Ref(5.0)
 
+periodic_log_stats = Throttle(; period=60.0)
+periodic_directmsg_counts = Throttle(; period=1.0)
+
 function netstats_start()
     @assert netstats_task[] |> isnothing
     netstats_running[] = true
-
-    periodic_log_stats = Throttle(; period=60.0)
 
     netstats_task[] = 
     errormonitor(@async while netstats_running[]
@@ -166,6 +167,12 @@ function netstats_start()
                          periodic_log_stats() do
                              lock(est().commons.stats) do cache_storage_stats
                                  MetricsLogger.log((; t=time(), cache_storage_stats))
+                             end
+                         end
+
+                         periodic_directmsg_counts() do
+                             MetricsLogger.log(r->(; funcall=:broadcast_directmsg_count)) do
+                                 broadcast_directmsg_count()
                              end
                          end
 
@@ -182,6 +189,30 @@ function netstats_stop()
     netstats_running[] = false
     wait(netstats_task[])
     netstats_task[] = nothing
+end
+
+function broadcast_directmsg_count()
+    for conn in collect(values(conns))
+        for (subid, filters) in lock(conn) do conn; conn.subs; end
+            for filt in filters
+                try
+                    if haskey(filt, "cache")
+                        filt = filt["cache"]
+                        if length(filt) >= 2 && filt[1] == "directmsg_count"
+                            pubkey = Nostr.PubKeyId(filt[2]["pubkey"])
+                            for d in Base.invokelatest(App().get_directmsg_count, est(); receiver=pubkey)
+                                @async send(conn, JSON.json(["EVENT", subid, d]))
+                            end
+                            @goto next
+                        end
+                    end
+                catch ex
+                    push!(exceptions, (:directmsg_counts, filt, ex))
+                end
+            end
+            @label next
+        end
+    end
 end
 
 end

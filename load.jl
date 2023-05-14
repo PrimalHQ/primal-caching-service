@@ -16,8 +16,9 @@ STORAGEPATH   = get(ENV, "PRIMALSERVER_STORAGE_PATH", "$(pwd())/var")
 PROXY         = get(ENV, "PRIMALSERVER_PROXY", nothing)
 FETCHER_SINCE = try parse(Int, ENV["PRIMALSERVER_FETCHER_SINCE"]) catch _ trunc(Int, time()) end
 NODEIDX       = parse(Int, get(ENV, "PRIMALSERVER_NODE_IDX", "1"))
+RELAYS_FILE   = get(ENV, "PRIMALSERVER_RELAYS", nothing)
 
-DB.PRINT_EXCEPTIONS[] = true
+#DB.PRINT_EXCEPTIONS[] = true
 
 gctask = Utils.GCTask()
 
@@ -28,8 +29,12 @@ Fetching.message_processors[:cache_storage] = (msg)->DB.import_msg_into_storage(
 
 Fetching.EVENTS_DATA_DIR[] = "$(STORAGEPATH)/primalnode$(NODEIDX)/fetcher"
 Fetching.PROXY_URI[] = PROXY
-Fetching.load_relays()
+if isnothing(RELAYS_FILE)
+    Fetching.load_relays()
+else
+    union!(Fetching.relays, [r for r in readlines(RELAYS_FILE) if !isempty(r)])
+end
 
-CacheServer.HOST[] = get(ENV, "PRIMALSERVER_HOST", "127.0.0.1")
+CacheServer.HOST[] = get(ENV, "PRIMALSERVER_HOST", "0.0.0.0")
 CacheServer.PORT[] = 8800+NODEIDX
 

@@ -7,7 +7,7 @@ using DataStructures: CircularBuffer
 using ..Utils: ThreadSafe, print_exceptions
 import ..Nostr
 
-HOST = Ref("127.0.0.1")
+HOST = Ref("0.0.0.0")
 PORT = Ref(8800)
 server_task = Ref{Any}(nothing) |> ThreadSafe
 

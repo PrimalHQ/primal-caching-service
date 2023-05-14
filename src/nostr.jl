@@ -34,9 +34,11 @@ end
     RECOMMEND_SERVER=2
     CONTACT_LIST=3
     DIRECT_MESSAGE=4
+    EVENT_DELETION=5
     REPOST=6
     REACTION=7
     ZAP_NOTE=9735
+    MUTE_LIST=10000
 end
 
 struct Event
@@ -50,17 +52,17 @@ struct Event
 end
 
 
-function parse_pubkey_id(s::String)
-    if startswith(s, "npub")
-        PubKeyId(zeros(UInt8, 32)) # TODO fix this
-    else
-        PubKeyId(hex2bytes(s))
-    end
-end
+# function parse_pubkey_id(s::String)
+#     if startswith(s, "npub")
+#         PubKeyId(zeros(UInt8, 32)) # TODO fix this
+#     else
+#         PubKeyId(s)
+#     end
+# end
 
 function vec2tags(tags::Vector)
     map(tags) do elem
-        # if     elem[1] == "e"; return TagE(EventId(hex2bytes(elem[2])), (length(elem) >= 3 ? elem[3] : nothing), [])
+        # if     elem[1] == "e"; return TagE(EventId(elem[2]), (length(elem) >= 3 ? elem[3] : nothing), [])
         # elseif elem[1] == "p"; return TagP(parse_pubkey_id(elem[2]), (length(elem) >= 3 ? elem[3] : nothing), [])
         # else                   return TagAny(elem)
         # end
@@ -68,14 +70,17 @@ function vec2tags(tags::Vector)
     end
 end
 
-function dict2event(d::Dict)
-    Event(EventId(hex2bytes(d["id"])),
-          PubKeyId(hex2bytes(d["pubkey"])),
+function dict2event(d::Dict{Symbol, Any})
+    dict2event(Dict([string(k)=>v for (k, v) in d]))
+end
+function dict2event(d::Dict{String, Any})
+    Event(EventId(d["id"]),
+          PubKeyId(d["pubkey"]),
           d["created_at"],
           d["kind"],
           vec2tags(d["tags"]),
           d["content"],
-          Sig(hex2bytes(d["sig"])))
+          Sig(d["sig"]))
 end
 Event(d::Dict) = dict2event(d)
 
@@ -88,6 +93,8 @@ function event2dict(e::Event) # TODO compare with Utils.obj2dict
          :content=>e.content,
          :sig=>JSON.lower(e.sig))
 end
+
+Base.Dict(e::Event) = event2dict(e)
 
 for ty in [EventId, PubKeyId, Sig]
     eval(:($(ty.name.name)(hex::String) = $(ty.name.name)(hex2bytes(hex))))
@@ -116,7 +123,7 @@ function verify(e::Event)
               e.kind,
               e.tags,
               e.content,
-             ] |> JSON.json |> SHA.sha256 |> EventId) || return false
+             ] |> JSON.json |> IOBuffer |> SHA.sha256 |> EventId) || return false
     Schnorr.verify(e) || return false
     true
 end
@@ -126,7 +133,15 @@ function bech32_decode(s::AbstractString)
     m = match(re_hrp, s)
     isnothing(m) && error("invalid hrp")
     hrp = m.captures[1]
-    bech32_decode(s, hrp)
+    id = bech32_decode(s, hrp)
+    isnothing(id) && error("unable to decode bech32")
+    if     hrp ==     "npub"; PubKeyId(id)
+    elseif hrp ==    "naddr"; PubKeyId(id)
+    elseif hrp == "nprofile"; PubKeyId(id)
+    elseif hrp ==     "note"; EventId(id)
+    elseif hrp ==   "nevent"; EventId(id)
+    else error("unsupported type of id")
+    end
 end
 function bech32_decode(s::AbstractString, hrp::AbstractString)
     outdata = zeros(UInt8, 100)

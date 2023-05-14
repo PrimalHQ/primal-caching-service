@@ -1,3 +1,6 @@
 [submodule "bech32"]
 	path = bech32
 	url = https://github.com/sipa/bech32
+[submodule "dev/HTTP.jl"]
+	path = dev/HTTP.jl
+	url = git@github.com:PrimalHQ/HTTP.jl.git
