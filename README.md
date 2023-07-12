@@ -1,3 +1,8 @@
+<br />
+<div align="center">
+    <img src="https://primal.net/assets/logo_fire-409917ad.svg" alt="Logo" width="80" height="80">
+</div>
+
 ### Overview
 
 Primal’s caching service for Nostr connects to the specified set of relays, collects all events in real time, stores them locally, and makes them available to nostr clients through a web socket-based API.
