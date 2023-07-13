@@ -211,7 +211,7 @@ Base.@kwdef struct CacheStorage <: EventStorage
 
     verification_enabled = true
 
-    auto_fetch_user_metadata = false
+    auto_fetch_missing_events = false
 
     tidcnts = Accumulator{Int, Int}() |> ThreadSafe
 
@@ -613,11 +613,54 @@ function prune(est::DeduplicatedEventStorage, keep_after::Int)
     exec(est.deduped_events, @sql("delete from kv where created_at < ?1"), (keep_after,))
 end
 
+fetch_requests = Dict() |> ThreadSafe
+fetch_requests_periodic = Throttle(; period=2.0)
+FETCH_REQUEST_DURATION = Ref(60)
+
+function fetch(filter)
+    lock(fetch_requests) do fetch_requests
+        haskey(fetch_requests, filter) && return
+        Fetching.fetch(filter)
+        fetch_requests[filter] = time()
+        fetch_requests_periodic() do
+            flushed = Set()
+            for (k, t) in collect(fetch_requests)
+                time() - t > FETCH_REQUEST_DURATION[] && push!(flushed, k)
+            end
+            for k in flushed
+                delete!(fetch_requests, k)
+            end
+        end
+    end
+end
+
 function fetch_user_metadata(est::CacheStorage, pubkey::Nostr.PubKeyId)
     kinds = []
     pubkey in est.meta_data || push!(kinds, Int(Nostr.SET_METADATA))
     pubkey in est.contact_lists || push!(kinds, Int(Nostr.CONTACT_LIST))
-    isempty(kinds) || Fetching.fetch((; kinds, authors=[pubkey]))
+    isempty(kinds) || fetch((; kinds, authors=[pubkey]))
+end
+
+function fetch_event(est::CacheStorage, eid::Nostr.EventId)
+    eid in est.event_ids || fetch((; ids=[eid]))
+end
+
+function fetch_missing_events(est::CacheStorage, e::Nostr.Event)
+    est.auto_fetch_missing_events && catch_exception(est, msg) do
+        for tag in e.tags
+            if length(tag.fields) >= 2
+                if tag.fields[1] == "e"
+                    if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
+                        fetch_event(est, eid)
+                    end
+                elseif tag.fields[1] == "p"
+                    if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                        fetch_user_metadata(est, pk)
+                    end
+                end
+            end
+        end
+    end
 end
 
 event_stats_fields = "event_id,
@@ -666,7 +709,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
         push!(est.pubkey_ids, e.pubkey)
         incr(est, :pubkeys)
         exe(est.pubkey_followers_cnt, @sql("insert or ignore into kv (key, value) values (?1,  ?2)"), e.pubkey, 0)
-        est.auto_fetch_user_metadata && fetch_user_metadata(est, e.pubkey)
+        est.auto_fetch_missing_events && fetch_user_metadata(est, e.pubkey)
         ext_pubkey(est, e)
     end
 
@@ -764,6 +807,9 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                     end
                 end
             end
+
+            fetch_missing_events(est, e)
+
         elseif e.kind == Int(Nostr.TEXT_NOTE)
             incr(est, :pubnotes)
 
@@ -780,10 +826,8 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
             for tag in e.tags
                 if length(tag.fields) >= 2
                     if tag.fields[1] == "e"
-                        try parent_eid = Nostr.EventId(tag.fields[2]) catch _ end
-                    elseif tag.fields[1] == "p"
-                        if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-                            est.auto_fetch_user_metadata && fetch_user_metadata(est, pk)
+                        if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
+                            parent_eid = eid
                         end
                     end
                 end
@@ -797,6 +841,8 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                 est.event_thread_parents[e.id] = parent_eid
                 ext_reply(est, e, parent_eid)
             end
+
+            fetch_missing_events(est, e)
 
         elseif e.kind == Int(Nostr.DIRECT_MESSAGE)
             import_directmsg(est, e)
@@ -828,6 +874,9 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                     end
                 end
             end
+
+            fetch_missing_events(est, e)
+
         elseif e.kind == Int(Nostr.ZAP_NOTE)
             # TODO zap auth
             amount_sats = 0
