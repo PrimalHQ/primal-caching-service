@@ -26,6 +26,7 @@ Base.@kwdef mutable struct Fetcher <: Utils.Tasked
     filename_date=Date(1,1,1)
 
     delay=0
+    waiting_delay=false
 
     message_count=0
     exception_count=0
@@ -34,6 +35,9 @@ Base.@kwdef mutable struct Fetcher <: Utils.Tasked
 
     latest_messages=CircularBuffer(200)
     latest_exceptions=CircularBuffer(200)
+
+    ws=Ref{Any}(nothing)
+    send_lock=ReentrantLock()
 end
 
 relays = Set{String}()
@@ -67,6 +71,8 @@ function mk_produce(funcname, cb; exceptions=nothing, exception_count=nothing, k
     (ccb, err, errscope)
 end
 
+incr(fe::Fetcher, prop::Symbol; by=1) = setproperty!(fe, prop, getproperty(fe, prop) + by)
+
 function nostr_fetch_events(
         on_msg::Function, fe::Fetcher; 
         since=Ref(trunc(Int, time())))
@@ -81,7 +87,7 @@ function nostr_fetch_events(
                                         exceptions=fe.latest_exceptions, 
                                         exception_count=@refprop(fe.exception_count),
                                         runid, fe.relay_url, fe.timeout, fe.proxy)
-    incstats(prop; by=1) = setproperty!(fe, prop, getproperty(fe, prop) + by)
+    incstats(prop::Symbol; by=1) = incr(fe, prop; by)
 
     produce(; event=:started)
 
@@ -93,6 +99,7 @@ function nostr_fetch_events(
         try
             @sync HTTP.WebSockets.open(fe.relay_url; connect_timeout=fe.timeout, readtimeout=fe.timeout, proxy=fe.proxy) do ws
                 close_ws = Ref(false)
+                fe.ws[] = ws
                 @async (while fe.active && !close_ws[]; sleep(1.0); end; try close(ws) catch _ end)
                 try
                     produce((; since=since[]); event=:connected)
@@ -103,7 +110,7 @@ function nostr_fetch_events(
                         produce((; query=q); event=:request)
                         msg = JSON.json(q)
                         incstats(:chars_sent, by=length(msg))
-                        HTTP.WebSockets.send(ws, msg)
+                        lock(fe.send_lock) do; HTTP.WebSockets.send(ws, msg); end
                     end
                     for s in ws
                         msg_cnt[] += 1
@@ -127,12 +134,18 @@ function nostr_fetch_events(
         catch ex
             err(ex, :websocket)
         end
+        fe.ws[] = nothing
 
         fe.active || break
         fe.delay = msg_cnt[] > 0 ? BASE_DELAY : min(fe.delay*2, MAX_DELAY)
         produce(; event=:sleep, fe.delay, msg_cnt=msg_cnt[])
 
-        active_sleep(fe.delay, @refprop(fe.active))
+        fe.waiting_delay = true
+        try
+            active_sleep(fe.delay, @refprop(fe.active))
+        finally
+            fe.waiting_delay = false
+        end
     end
 end
 
@@ -285,6 +298,18 @@ end
 
 function stop()
     update_fetchers!([])
+end
+
+function fetch(filter)
+    msg = JSON.json(["REQ", randsubid(), filter])
+    for fe in values(fetchers)
+        if !isnothing(fe.ws[])
+            lock(fe.send_lock) do
+                try HTTP.WebSockets.send(fe.ws[], msg) catch _ end
+                incr(fe, :chars_sent; by=length(msg))
+            end
+        end
+    end
 end
 
 end

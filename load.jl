@@ -22,8 +22,12 @@ RELAYS_FILE   = get(ENV, "PRIMALSERVER_RELAYS", nothing)
 
 gctask = Utils.GCTask()
 
-cache_storage = DB.CacheStorage(directory="$(STORAGEPATH)/primalnode$(NODEIDX)/cache",
-                                dbargs=(; ndbs=1, journal_mode="WAL"))
+auto_fetch_user_metadata = get(ENV, "PRIMALSERVER_AUTO_FETCH_USER_METADATA", nothing) == "1"
+
+cache_storage = DB.CacheStorage(;
+                                directory="$(STORAGEPATH)/primalnode$(NODEIDX)/cache",
+                                dbargs=(; ndbs=1, journal_mode="WAL"), 
+                                auto_fetch_user_metadata)
 
 Fetching.message_processors[:cache_storage] = (msg)->DB.import_msg_into_storage(msg, cache_storage)
 

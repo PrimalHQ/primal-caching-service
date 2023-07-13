@@ -1,3 +1,5 @@
 wss://nos.lol
 wss://relayable.org
 wss://relay.damus.io
+wss://nostr.mom
+wss://relay.primal.net

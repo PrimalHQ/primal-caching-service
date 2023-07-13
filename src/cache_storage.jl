@@ -14,6 +14,7 @@ import ..Utils
 using ..Utils: ThreadSafe, Throttle, GCTask, stop
 
 import ..Nostr
+import ..Fetching
 
 include("sqlite.jl")
 
@@ -209,6 +210,8 @@ Base.@kwdef struct CacheStorage <: EventStorage
     commons = StorageCommons(; directory, dbargs)
 
     verification_enabled = true
+
+    auto_fetch_user_metadata = false
 
     tidcnts = Accumulator{Int, Int}() |> ThreadSafe
 
@@ -610,6 +613,13 @@ function prune(est::DeduplicatedEventStorage, keep_after::Int)
     exec(est.deduped_events, @sql("delete from kv where created_at < ?1"), (keep_after,))
 end
 
+function fetch_user_metadata(est::CacheStorage, pubkey::Nostr.PubKeyId)
+    kinds = []
+    pubkey in est.meta_data || push!(kinds, Int(Nostr.SET_METADATA))
+    pubkey in est.contact_lists || push!(kinds, Int(Nostr.CONTACT_LIST))
+    isempty(kinds) || Fetching.fetch((; kinds, authors=[pubkey]))
+end
+
 event_stats_fields = "event_id,
                       author_pubkey,
                       created_at,
@@ -656,6 +666,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
         push!(est.pubkey_ids, e.pubkey)
         incr(est, :pubkeys)
         exe(est.pubkey_followers_cnt, @sql("insert or ignore into kv (key, value) values (?1,  ?2)"), e.pubkey, 0)
+        est.auto_fetch_user_metadata && fetch_user_metadata(est, e.pubkey)
         ext_pubkey(est, e)
     end
 
@@ -767,8 +778,14 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
 
             parent_eid = nothing
             for tag in e.tags
-                if length(tag.fields) >= 2 && tag.fields[1] == "e"
-                    try parent_eid = Nostr.EventId(tag.fields[2]) catch _ end
+                if length(tag.fields) >= 2
+                    if tag.fields[1] == "e"
+                        try parent_eid = Nostr.EventId(tag.fields[2]) catch _ end
+                    elseif tag.fields[1] == "p"
+                        if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                            est.auto_fetch_user_metadata && fetch_user_metadata(est, pk)
+                        end
+                    end
                 end
             end
             if !isnothing(parent_eid)
