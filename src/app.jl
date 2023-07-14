@@ -326,6 +326,8 @@ end
 function user_profile(est::DB.CacheStorage; pubkey)
     pubkey = cast(pubkey, Nostr.PubKeyId)
 
+    est.auto_fetch_missing_events && DB.fetch_user_metadata(est, pubkey)
+
     res = [] |> ThreadSafe
 
     pubkey in est.meta_data && push!(res, est.events[est.meta_data[pubkey]])
