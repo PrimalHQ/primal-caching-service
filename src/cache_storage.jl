@@ -213,6 +213,8 @@ Base.@kwdef struct CacheStorage <: EventStorage
 
     auto_fetch_missing_events = false
 
+    event_processors = SortedDict{Symbol, Function}() |> ThreadSafe
+
     tidcnts = Accumulator{Int, Int}() |> ThreadSafe
 
     periodic_task_running = Ref(false)
@@ -695,6 +697,14 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
     est.verification_enabled && !verify(est, e) && return false
 
     !force && e.id in est.events && return true
+
+    lock(est.event_processors) do event_processors
+        for func in values(event_processors)
+            catch_exception(est, func, e) do
+                Base.invokelatest(func, e)
+            end
+        end
+    end
 
     ext_preimport_check(est, e) || return false
 

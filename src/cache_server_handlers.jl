@@ -90,34 +90,52 @@ function initial_filter_handler(ws::WebSocket, subid, filters)
         send(ws, JSON.json(["EOSE", subid]))
     end
 
-    for filt in filters
-        if "cache" in keys(filt)
-            local filt = filt["cache"]
-            try
+    function app_funcall(funcall::Symbol, kwargs; kwargs_extra=Pair{Symbol, Any}[])
+        ext_funcall(funcall, kwargs, kwargs_extra, ws)
+        MetricsLogger.log(r->begin
+                              lock(max_request_duration) do max_request_duration
+                                  max_request_duration[] = max(max_request_duration[], r.time)
+                              end
+                              lock(requests_per_period) do requests_per_period
+                                  requests_per_period[] += 1
+                              end
+                              (; funcall, kwargs, ws=string(ws_id), subid)
+                          end) do
+            fetch(Threads.@spawn Base.invokelatest(getproperty(App(), funcall), est(); kwargs..., kwargs_extra...))
+        end |> sendres
+    end
+
+    try
+        for filt in filters
+            if haskey(filt, "cache")
+                local filt = filt["cache"]
                 funcall = Symbol(filt[1])
                 if !(funcall in [:net_stats, :notifications, :notification_counts, :directmsg_count])
                     @assert funcall in App().exposed_functions
                     kwargs = [Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
-                    kwargs_extra = Pair{Symbol, Any}[]
-                    ext_funcall(funcall, kwargs, kwargs_extra, ws)
-                    MetricsLogger.log(r->begin
-                                          lock(max_request_duration) do max_request_duration
-                                              max_request_duration[] = max(max_request_duration[], r.time)
-                                          end
-                                          lock(requests_per_period) do requests_per_period
-                                              requests_per_period[] += 1
-                                          end
-                                          (; funcall, kwargs, ws=string(ws_id), subid)
-                                      end) do
-                        fetch(Threads.@spawn Base.invokelatest(getproperty(App(), funcall), est(); kwargs..., kwargs_extra...))
-                    end |> sendres
+                    app_funcall(funcall, kwargs)
                 end
-            catch ex
-                PRINT_EXCEPTIONS[] && Utils.print_exceptions()
-                ex isa TaskFailedException && (ex = ex.task.result)
-                send_error(ex isa ErrorException ? ex.msg : "error")
+
+            elseif haskey(filt, "ids")
+                eids = []
+                for s in filt["ids"]
+                    try push!(eids, Nostr.EventId(s)) catch _ end
+                end
+                app_funcall(:events, [:event_ids=>eids])
+
+            elseif haskey(filt, "since") || haskey(filt, "until")
+                kwargs = []
+                for a in ["since", "until", "limit"]
+                    haskey(filt, a) && push!(kwargs, Symbol(a)=>filt[a])
+                end
+                sendres([haskey(filt, "idsonly") ? (; id=e.id, kind=e.kind, created_at=e.created_at) : e
+                         for e in App().events(est(); kwargs...)])
             end
         end
+    catch ex
+        PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+        ex isa TaskFailedException && (ex = ex.task.result)
+        send_error(ex isa ErrorException ? ex.msg : "error")
     end
 end
 
@@ -211,6 +229,22 @@ function broadcast_directmsg_count()
                 end
             end
             @label next
+        end
+    end
+end
+
+function broadcast(e::Nostr.Event)
+    for conn in collect(values(conns))
+        for (subid, filters) in lock(conn) do conn; conn.subs; end
+            for filt in filters
+                if length(filt) == 1
+                    if haskey(filt, "since")
+                        @async send(conn, JSON.json(["EVENT", subid, e]))
+                    elseif get(filt, "idsonly", nothing) == [""]
+                        @async send(conn, JSON.json(["EVENT", subid, (; id=e.id, kind=e.kind, created_at=e.created_at)]))
+                    end
+                end
+            end
         end
     end
 end

@@ -307,17 +307,28 @@ end
 
 function events(
         est::DB.CacheStorage; 
-        event_ids::Vector, extended_response::Bool=false, user_pubkey=nothing,
+        event_ids::Vector=[], extended_response::Bool=false, user_pubkey=nothing,
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
     )
-    event_ids = [eid isa Nostr.EventId ? eid : Nostr.EventId(eid) for eid in event_ids]
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    if isempty(event_ids)
+        event_ids = [r[1] for r in DB.exec(est.event_created_at, 
+                                           DB.@sql("select event_id from kv 
+                                                   where created_at >= ?1 and created_at <= ?2 
+                                                   order by created_at asc 
+                                                   limit ?3 offset ?4"),
+                                           (since, until, limit, offset))]
+    end
+
+    event_ids = [cast(eid, Nostr.EventId) for eid in event_ids]
 
     if !extended_response
         res = [] |> ThreadSafe
         @threads for eid in event_ids 
             eid in est.events && push!(res, est.events[eid])
         end
-        res.wrapped
+        sort(res.wrapped; by=e->e.created_at)
     else
         response_messages_for_posts(est, event_ids; user_pubkey)
     end

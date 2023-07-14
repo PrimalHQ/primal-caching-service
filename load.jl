@@ -42,3 +42,5 @@ end
 CacheServer.HOST[] = get(ENV, "PRIMALSERVER_HOST", "0.0.0.0")
 CacheServer.PORT[] = 8800+NODEIDX
 
+cache_storage.event_processors[:broadcast_event] = CacheServerHandlers.broadcast
+
