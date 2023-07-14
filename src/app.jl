@@ -208,6 +208,8 @@ end
 function thread_view(est::DB.CacheStorage; event_id, user_pubkey=nothing, kwargs...)
     event_id = cast(event_id, Nostr.EventId)
 
+    est.auto_fetch_missing_events && DB.fetch_event(est, event_id)
+
     res = []
 
     hidden = ext_is_hidden(est, event_id) || event_id in est.deleted_events
