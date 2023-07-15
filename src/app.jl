@@ -334,6 +334,7 @@ function events(
         est::DB.CacheStorage; 
         event_ids::Vector=[], extended_response::Bool=false, user_pubkey=nothing,
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+        idsonly=false,
     )
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
@@ -348,7 +349,9 @@ function events(
 
     event_ids = [cast(eid, Nostr.EventId) for eid in event_ids]
 
-    if !extended_response
+    if idsonly
+        [(; kind=Int(EVENT_IDS), ids=event_ids)]
+    elseif !extended_response
         res = [] |> ThreadSafe
         @threads for eid in event_ids 
             eid in est.events && push!(res, est.events[eid])

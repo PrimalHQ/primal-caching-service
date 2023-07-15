@@ -125,11 +125,10 @@ function initial_filter_handler(ws::WebSocket, subid, filters)
 
             elseif haskey(filt, "since") || haskey(filt, "until")
                 kwargs = []
-                for a in ["since", "until", "limit"]
+                for a in ["since", "until", "limit", "idsonly"]
                     haskey(filt, a) && push!(kwargs, Symbol(a)=>filt[a])
                 end
-                sendres([haskey(filt, "idsonly") ? (; id=e.id, kind=e.kind, created_at=e.created_at) : e
-                         for e in App().events(est(); kwargs...)])
+                sendres(App().events(est(); kwargs...))
             end
         end
     catch ex
@@ -234,14 +233,15 @@ function broadcast_directmsg_count()
 end
 
 function broadcast(e::Nostr.Event)
+    EVENT_IDS = App().EVENT_IDS
     for conn in collect(values(conns))
         for (subid, filters) in lock(conn) do conn; conn.subs; end
             for filt in filters
                 if length(filt) == 1
                     if haskey(filt, "since")
                         @async send(conn, JSON.json(["EVENT", subid, e]))
-                    elseif get(filt, "idsonly", nothing) == [""]
-                        @async send(conn, JSON.json(["EVENT", subid, (; id=e.id, kind=e.kind, created_at=e.created_at)]))
+                    elseif get(filt, "idsonly", nothing) == true
+                        @async send(conn, JSON.json(["EVENT", subid, (; kind=Int(EVENT_IDS), ids=[e.id])]))
                     end
                 end
             end
