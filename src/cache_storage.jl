@@ -327,7 +327,8 @@ Base.@kwdef struct CacheStorage <: EventStorage
     deleted_events = ShardedSqliteDict{Nostr.EventId, Nostr.EventId}("$(commons.directory)/db/deleted_events"; commons.dbargs...,
                                                                      keycolumn="event_id", valuecolumn="deletion_event_id")
 
-    mute_list = ShardedSqliteDict{Nostr.PubKeyId, Nostr.EventId}("$(commons.directory)/db/mute_list"; commons.dbargs...)
+    mute_list   = ShardedSqliteDict{Nostr.PubKeyId, Nostr.EventId}("$(commons.directory)/db/mute_list"; commons.dbargs...)
+    mute_list_2 = ShardedSqliteDict{Nostr.PubKeyId, Nostr.EventId}("$(commons.directory)/db/mute_list_2"; commons.dbargs...)
 
     pubkey_directmsgs = ShardedSqliteSet(Nostr.PubKeyId, "$(commons.directory)/db/pubkey_directmsgs"; commons.dbargs...,
                                          table="pubkey_directmsgs", keycolumn="receiver", valuecolumn="event_id",
@@ -488,7 +489,7 @@ MAX_SATSZAPPED = Ref(1_000_000)
 re_hashref = r"\#\[([0-9]*)\]"
 re_mention = r"\bnostr:((note|npub|naddr|nevent|nprofile)1\w+)\b"
 
-function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event)
+function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkeys_in_content=true)
     e.kind == Int(Nostr.TEXT_NOTE) || return
     mentiontags = Set()
     for m in eachmatch(re_hashref, e.content)
@@ -505,6 +506,7 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event)
         s = m.captures[1]
         catch_exception(est, e, m) do
             if !isnothing(local id = try Nostr.bech32_decode(s) catch _ end)
+                id isa Nostr.PubKeyId && !pubkeys_in_content && return
                 push!(mentiontags, Nostr.TagAny([id isa Nostr.PubKeyId ? "p" : "e", Nostr.hex(id)]))
             end
         end
@@ -922,6 +924,15 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
             end
         elseif e.kind == Int(Nostr.MUTE_LIST)
             est.mute_list[e.pubkey] = e.id
+        elseif e.kind == Int(Nostr.CATEGORIZED_PEOPLE)
+            for tag in e.tags
+                if length(tag.fields) >= 2
+                    if tag.fields[1] == "d" && tag.fields[2] == "mute"
+                        est.mute_list_2[e.pubkey] = e.id
+                        break
+                    end
+                end
+            end
         end
     end
 

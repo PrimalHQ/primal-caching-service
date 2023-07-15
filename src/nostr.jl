@@ -39,6 +39,7 @@ end
     REACTION=7
     ZAP_NOTE=9735
     MUTE_LIST=10000
+    CATEGORIZED_PEOPLE=30000
 end
 
 struct Event

@@ -79,6 +79,40 @@ function event_actions(est::DB.CacheStorage, eid::Nostr.EventId, user_pubkey::No
     end
 end
 
+TMuteList = Set{Nostr.PubKeyId}
+TMuteListHash = Vector{UInt8}
+compiled_mute_lists = Dict{Nostr.PubKeyId, Tuple{TMuteListHash, TMuteList}}() |> ThreadSafe
+
+function compile_mute_list(est::DB.CacheStorage, pubkey)
+    mute_list = TMuteList()
+    if !isnothing(pubkey)
+        eids = Set{Nostr.EventId}()
+        for pk in [pubkey, ext_user_mute_lists(est, pubkey)...]
+            pk in est.mute_list   && push!(eids, est.mute_list[pk])
+            pk in est.mute_list_2 && push!(eids, est.mute_list_2[pk])
+        end
+        eids = sort(collect(eids))
+
+        h = SHA.sha256(vcat([eid.hash for eid in eids]...))
+
+        hml = get(compiled_mute_lists, pubkey, nothing)
+        !isnothing(hml) && hml[1] == h && return hml[2]
+
+        for eid in eids
+            for tag in est.events[eid].tags
+                if length(tag.fields) >= 2 && tag.fields[1] == "p"
+                    if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                        push!(mute_list, pk)
+                    end
+                end
+            end
+        end
+
+        compiled_mute_lists[pubkey] = (h, mute_list)
+    end
+    mute_list
+end
+
 function response_messages_for_posts(
         est::DB.CacheStorage, eids::Vector{Nostr.EventId}; 
         res_meta_data=Dict(), user_pubkey=nothing,
@@ -88,16 +122,7 @@ function response_messages_for_posts(
     pks = Set{Nostr.PubKeyId}() |> ThreadSafe
     res_meta_data = res_meta_data |> ThreadSafe
 
-    mute_list = Set{Nostr.PubKeyId}()
-    if !isnothing(user_pubkey) && user_pubkey in est.mute_list
-        for tag in est.events[est.mute_list[user_pubkey]].tags
-            if length(tag.fields) >= 2 && tag.fields[1] == "p"
-                if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-                    push!(mute_list, pk)
-                end
-            end
-        end
-    end
+    mute_list = compile_mute_list(est, user_pubkey)
 
     function handle_event(body::Function, eid::Nostr.EventId; wrapfun::Function=identity)
         ext_is_hidden(est, eid) && return
@@ -527,5 +552,6 @@ end
 function ext_user_infos(est::DB.CacheStorage, res, res_meta_data) end
 function ext_is_hidden(est::DB.CacheStorage, eid::Nostr.EventId); false; end
 function ext_event_response(est::DB.CacheStorage, e::Nostr.Event); []; end
+function ext_user_mute_lists(est::DB.CacheStorage, user_pubkey::Nostr.PubKeyId); []; end
 
 end
