@@ -28,6 +28,7 @@ RANGE=10_000_113
 EVENT_ACTIONS=10_000_115
 DIRECTMSG_COUNT=10_000_117
 DIRECTMSG_COUNTS=10_000_118
+EVENT_IDS=10_000_122
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = isnothing(value) ? value : cast(value, type)
