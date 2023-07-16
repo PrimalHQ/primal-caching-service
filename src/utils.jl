@@ -230,18 +230,6 @@ function Base.lock(f::Function, os::Vector{ThreadSafe})
     end
 end
 
-#import Profile, ProfileSVG, FlameGraphs, Colors
-#function prof(seconds=5)
-#    Profile.clear()
-#    Profile.@profile sleep(seconds)
-#    #ProfileSVG.save(FlameGraphs.FlameColors(colorbg=Colors.colorant"gray40", colorfont=Colors.colorant"black"), "t.svg")
-#    ProfileSVG.save("t.svg"; bgcolor=:transparent, fontcolor=:currentcolor)
-#    run(pipeline(`sed -e 's/^\(<svg.*\)/\1 style="background: black"/g' t.svg`, stdout="flamegraph.svg"))
-#    rm("t.svg")
-#    run(`chromium flamegraph.svg`)
-#    nothing
-#end
-
 import TerminalUserInterfaces
 TUI = TerminalUserInterfaces
 export move_cursor

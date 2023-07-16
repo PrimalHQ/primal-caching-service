@@ -14,16 +14,6 @@ Base.convert(::Type{PubKeyId}, arr::Vector{UInt8}) = PubKeyId(arr)
 Base.convert(::Type{Sig}, arr::Vector{UInt8}) = Sig(arr)
 
 abstract type Tag end
-# struct TagE <: Tag
-#     event_id::EventId
-#     relay_url::Union{URL,Nothing}
-#     extra::Vector{Any}
-# end
-# struct TagP <: Tag
-#     pubkey_id::PubKeyId
-#     relay_url::Union{URL,Nothing}
-#     extra::Vector{Any}
-# end
 struct TagAny <: Tag
     fields::Vector{Any}
 end
@@ -53,20 +43,8 @@ struct Event
 end
 
 
-# function parse_pubkey_id(s::String)
-#     if startswith(s, "npub")
-#         PubKeyId(zeros(UInt8, 32)) # TODO fix this
-#     else
-#         PubKeyId(s)
-#     end
-# end
-
 function vec2tags(tags::Vector)
     map(tags) do elem
-        # if     elem[1] == "e"; return TagE(EventId(elem[2]), (length(elem) >= 3 ? elem[3] : nothing), [])
-        # elseif elem[1] == "p"; return TagP(parse_pubkey_id(elem[2]), (length(elem) >= 3 ? elem[3] : nothing), [])
-        # else                   return TagAny(elem)
-        # end
         TagAny(elem)
     end
 end
@@ -113,7 +91,6 @@ JSON.lower(tag::TagAny) = tag.fields
 
 include("schnorr.jl")
 
-#TODO: check that event id is equal to sha256 of whole contents
 Schnorr.verify(ctx::Schnorr.Secp256k1Ctx, e::Event) = Schnorr.verify(ctx, collect(e.id.hash), collect(e.pubkey.pk), collect(e.sig.sig))
 Schnorr.verify(e::Event) = Schnorr.verify(collect(e.id.hash), collect(e.pubkey.pk), collect(e.sig.sig))
 
@@ -172,17 +149,5 @@ function bech32_encode(input::Vector{UInt8}, hrp::AbstractString)
     end
     nothing
 end
-
-# import JSON
-# begin
-#     e = Main.evts[1] |> Dict{String,Any}
-#     e["tags"] isa String && (e["tags"] = JSON.parse(e["tags"]))
-#     e["created_at"] = parse(Int, e["created_at"])
-#     e["kind"] = parse(Int, e["kind"])
-#     ee = dict2event(e)
-#     ee |> display
-#     Main.eval(:(ee=$ee))
-#     @show Schnorr.verify(ee)
-# end
 
 end
