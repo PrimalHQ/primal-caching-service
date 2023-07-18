@@ -94,7 +94,7 @@ function compile_mute_list(est::DB.CacheStorage, pubkey)
         end
         eids = sort(collect(eids))
 
-        h = SHA.sha256(vcat([eid.hash for eid in eids]...))
+        h = SHA.sha256(vcat([0x00], [eid.hash for eid in eids]...))
 
         hml = get(compiled_mute_lists, pubkey, nothing)
         !isnothing(hml) && hml[1] == h && return hml[2]
