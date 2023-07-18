@@ -62,6 +62,12 @@ function on_client_message(ws, msg)
     end
 end
 
+MAX_TIME_PER_REQUEST = Ref(10.0)
+function with_time_limit(body::Function)
+    tstart = time()
+    body(() -> (time() - tstart) >= MAX_TIME_PER_REQUEST[])
+end
+
 function send(ws::WebSocket, s::String)
     WebSockets.send(ws, s)
 end
@@ -101,7 +107,11 @@ function initial_filter_handler(ws::WebSocket, subid, filters)
                               end
                               (; funcall, kwargs, ws=string(ws_id), subid)
                           end) do
-            fetch(Threads.@spawn Base.invokelatest(getproperty(App(), funcall), est(); kwargs..., kwargs_extra...))
+        fetch(Threads.@spawn with_time_limit() do time_exceeded
+                  funcall in [:feed] && push!(kwargs, :time_exceeded=>time_exceeded)
+                  vcat(Base.invokelatest(getproperty(App(), funcall), est(); kwargs..., kwargs_extra...),
+                       time_exceeded() ? [(; kind=App().PARTIAL_RESPONSE)] : [])
+              end)
         end |> sendres
     end
 

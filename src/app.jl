@@ -29,6 +29,7 @@ EVENT_ACTIONS=10_000_115
 DIRECTMSG_COUNT=10_000_117
 DIRECTMSG_COUNTS=10_000_118
 EVENT_IDS=10_000_122
+PARTIAL_RESPONSE=10_000_123
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = isnothing(value) ? value : cast(value, type)
@@ -196,6 +197,7 @@ function feed(
         pubkey=nothing, notes::Union{Symbol,String}=:follows, include_replies=false,
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
         user_pubkey=nothing,
+        time_exceeded=()->false,
     )
     limit <= 1000 || error("limit too big")
     notes = Symbol(notes)
@@ -217,12 +219,14 @@ function feed(
         else;                      error("unsupported type of notes")
         end
         @threads for p in pubkeys
+            time_exceeded() && break
             append!(posts, map(Tuple, DB.exe(est.pubkey_events, DB.@sql("select event_id, created_at from kv 
                                                                         where pubkey = ? and created_at >= ? and created_at <= ? and (is_reply = 0 or is_reply = ?)
                                                                         order by created_at desc limit ? offset ?"),
                                              p, since, until, Int(include_replies), limit, offset)))
         end
     end
+
     posts = sort(posts.wrapped, by=p->-p[2])[1:min(limit, length(posts))]
 
     eids = [Nostr.EventId(eid) for (eid, _) in posts]
