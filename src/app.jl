@@ -11,8 +11,11 @@ using ..Utils: ThreadSafe
 exposed_functions = Set([:feed,
                          :thread_view,
                          :network_stats,
+                         :contact_list,
                          :user_infos,
+                         :user_followers,
                          :events,
+                         :event_actions,
                          :user_profile,
                          :get_directmsg_contacts,
                          :reset_directmsg_count,
@@ -25,11 +28,12 @@ NET_STATS=10_000_101
 USER_PROFILE=10_000_105
 REFERENCED_EVENT=10_000_107
 RANGE=10_000_113
-EVENT_ACTIONS=10_000_115
+EVENT_ACTIONS_COUNT=10_000_115
 DIRECTMSG_COUNT=10_000_117
 DIRECTMSG_COUNTS=10_000_118
 EVENT_IDS=10_000_122
 PARTIAL_RESPONSE=10_000_123
+# EVENT_ACTIONS=10_000_116
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = isnothing(value) ? value : cast(value, type)
@@ -69,16 +73,30 @@ function event_stats(est::DB.CacheStorage, eid::Nostr.EventId)
     end
 end
 
-function event_actions(est::DB.CacheStorage, eid::Nostr.EventId, user_pubkey::Nostr.PubKeyId)
+function event_actions_cnt(est::DB.CacheStorage, eid::Nostr.EventId, user_pubkey::Nostr.PubKeyId)
     r = DB.exe(est.event_pubkey_actions, DB.@sql("select replied, liked, reposted, zapped from kv where event_id = ?1 and pubkey = ?2"), eid, user_pubkey)
     if isempty(r)
         []
     else
         ea = zip([:replied, :liked, :reposted, :zapped], map(Bool, r[1]))
         [(; 
-          kind=Int(EVENT_ACTIONS),
+          kind=Int(EVENT_ACTIONS_COUNT),
           content=JSON.json((; event_id=eid, ea...)))]
     end
+end
+
+function event_actions(est::DB.CacheStorage; event_id, user_pubkey, kind::Int, limit=100)
+    limit <= 1000 || error("limit too big")
+    event_id = cast(event_id, Nostr.EventId)
+    user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
+    pks = [Nostr.PubKeyId(pk) 
+           for (pk,) in DB.exe(est.event_pubkey_action_refs,
+                               DB.@sql("select ref_pubkey from kv 
+                                        where event_id = ?1 and ref_kind = ?2 
+                                        order by ref_created_at desc
+                                        limit ?3"),
+                               event_id, kind, limit)]
+    user_infos(est; pubkeys=pks)
 end
 
 TMuteList = Set{Nostr.PubKeyId}
@@ -135,7 +153,7 @@ function response_messages_for_posts(
         ext_is_hidden(est, e.pubkey) && return
         push!(res, wrapfun(e))
         union!(res, event_stats(est, e.id))
-        isnothing(user_pubkey) || union!(res, event_actions(est, e.id, user_pubkey))
+        isnothing(user_pubkey) || union!(res, event_actions_cnt(est, e.id, user_pubkey))
         push!(pks, e.pubkey)
         union!(res, ext_event_response(est, e))
 
@@ -315,9 +333,35 @@ function network_stats(est::DB.CacheStorage)
     end
 end
 
+function user_scores(est::DB.CacheStorage, res_meta_data)
+    [(; kind=Int(USER_SCORES),
+      content=JSON.json(Dict([(Nostr.hex(e.pubkey), get(est.pubkey_followers_cnt, e.pubkey, 0))
+                              for e in collect(res_meta_data)])))]
+end
+
 function contact_list(est::DB.CacheStorage; pubkey)
     pubkey = cast(pubkey, Nostr.PubKeyId)
-    haskey(est.contact_lists, pubkey) ? [est.events[est.contact_lists[pubkey]]] : []
+
+    res_meta_data = Dict() |> ThreadSafe
+    @threads for pk in follows(est, pubkey) 
+        if pk in est.meta_data
+            eid = est.meta_data[pk]
+            eid in est.events && (res_meta_data[pk] = est.events[eid])
+        end
+    end
+
+    res = []
+
+    if pubkey in est.contact_lists
+        eid = est.contact_lists[pubkey]
+        eid in est.events && push!(res, est.events[eid])
+    end
+
+    res_meta_data = collect(values(res_meta_data))
+    append!(res, res_meta_data)
+    append!(res, user_scores(est, res_meta_data))
+    ext_user_infos(est, res, res_meta_data)
+    res
 end
 
 function user_infos(est::DB.CacheStorage; pubkeys::Vector)
@@ -326,13 +370,41 @@ function user_infos(est::DB.CacheStorage; pubkeys::Vector)
     res_meta_data = Dict() |> ThreadSafe
     @threads for pk in pubkeys 
         if pk in est.meta_data
-            res_meta_data[pk] = est.events[est.meta_data[pk]]
+            eid = est.meta_data[pk]
+            eid in est.events && (res_meta_data[pk] = est.events[eid])
         end
     end
-    res = []
-    append!(res, collect(values(res_meta_data)))
-    ext_user_infos(est, res, collect(values(res_meta_data)))
+    res_meta_data_arr = []
+    for pk in pubkeys
+        haskey(res_meta_data, pk) && push!(res_meta_data_arr, res_meta_data[pk])
+    end
+    res = [res_meta_data_arr..., user_scores(est, res_meta_data_arr)...]
+    ext_user_infos(est, res, res_meta_data_arr)
     res
+end
+
+function user_followers(est::DB.CacheStorage; pubkey, limit=200)
+    limit <= 1000 || error("limit too big")
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    pks = Set{Nostr.PubKeyId}()
+    for pk in follows(est, pubkey)
+        if !isempty(DB.exe(est.pubkey_followers, 
+                           DB.@sql("select 1 from kv 
+                                   where pubkey = ?1 and follower_pubkey = ?2
+                                   limit 1"), pubkey, pk))
+            push!(pks, pk)
+        end
+    end
+    for r in DB.exe(est.pubkey_followers, 
+                    DB.@sql("select follower_pubkey from kv 
+                            where pubkey = ?1 
+                            order by follower_pubkey
+                            limit ?2"), pubkey, limit)
+        length(pks) < limit || break
+        pk = Nostr.PubKeyId(r[1])
+        pk in pks || push!(pks, pk)
+    end
+    user_infos(est; pubkeys=collect(pks))
 end
 
 function events(
@@ -376,7 +448,8 @@ function user_profile(est::DB.CacheStorage; pubkey)
 
     pubkey in est.meta_data && push!(res, est.events[est.meta_data[pubkey]])
 
-    note_count = DB.exe(est.pubkey_events, DB.@sql("select count(1) from kv where pubkey = ?"), pubkey)[1][1]
+    note_count  = DB.exe(est.pubkey_events, DB.@sql("select count(1) from kv where pubkey = ? and is_reply = false"), pubkey)[1][1]
+    reply_count = DB.exe(est.pubkey_events, DB.@sql("select count(1) from kv where pubkey = ? and is_reply = true"), pubkey)[1][1]
 
     time_joined_r = DB.exe(est.pubkey_events, DB.@sql("select created_at from kv
                                                        where pubkey = ?
@@ -391,6 +464,7 @@ function user_profile(est::DB.CacheStorage; pubkey)
                                    follows_count=length(follows(est, pubkey)),
                                    followers_count=get(est.pubkey_followers_cnt, pubkey, 0),
                                    note_count,
+                                   reply_count,
                                    time_joined,
                                   ))))
     res.wrapped

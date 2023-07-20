@@ -324,6 +324,19 @@ Base.@kwdef struct CacheStorage <: EventStorage
                                                           "create index if not exists kv_updated_at on kv (updated_at desc)",
                                                          ])
 
+    event_pubkey_action_refs = ShardedSqliteSet(Nostr.EventId, "$(commons.directory)/db/event_pubkey_action_refs"; commons.dbargs...,
+                                                init_queries=["create table if not exists kv (
+                                                                 event_id blob not null,
+                                                                 ref_event_id blob not null,
+                                                                 ref_pubkey blob not null,
+                                                                 ref_created_at int not null,
+                                                                 ref_kind int not null
+                                                              )",
+                                                              "create index if not exists kv_event_id on kv (event_id asc)",
+                                                              "create index if not exists kv_ref_event_id on kv (ref_event_id asc)",
+                                                              "create index if not exists kv_ref_created_at on kv (ref_created_at desc)",
+                                                             ])
+
     deleted_events = ShardedSqliteDict{Nostr.EventId, Nostr.EventId}("$(commons.directory)/db/deleted_events"; commons.dbargs...,
                                                                      keycolumn="event_id", valuecolumn="deletion_event_id")
 
@@ -359,6 +372,7 @@ Base.@kwdef struct CacheStorage <: EventStorage
     pubkey_directmsgs_cnt_lock = ReentrantLock()
 
     ext = Ref{Any}(nothing)
+    dyn = Dict()
 end
 
 function close_conns(est)
@@ -443,11 +457,13 @@ function track_user_stats(body::Function, est::CacheStorage, pubkey::Nostr.PubKe
     end
 end
 
-function event_pubkey_action(est::CacheStorage, eid::Nostr.EventId, pubkey::Nostr.PubKeyId, action::Symbol)
-    exe(est.event_pubkey_actions, @sql("insert or ignore into kv (event_id, pubkey, created_at, updated_at, replied, liked, reposted, zapped) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"), 
-        eid, pubkey, trunc(Int, time()), 0, false, false, false, false)
+function event_pubkey_action(est::CacheStorage, eid::Nostr.EventId, re::Nostr.Event, action::Symbol)
+    exe(est.event_pubkey_actions, @sql("insert or ignore into kv values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"), 
+        eid, re.pubkey, re.created_at, 0, false, false, false, false)
     exe(est.event_pubkey_actions, "update kv set $(action) = true, updated_at = ?3 where event_id = ?1 and pubkey = ?2", 
-        eid, pubkey, trunc(Int, time()))
+        eid, re.pubkey, re.created_at)
+    exe(est.event_pubkey_action_refs, @sql("insert into kv values (?1, ?2, ?3, ?4, ?5)"), 
+        eid, re.id, re.pubkey, re.created_at, re.kind)
 end
 
 function zap_sender(zap_receipt::Nostr.Event)
@@ -813,7 +829,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                         c = e.content
                         if isempty(c) || c[1] in "🤙+❤️"
                             event_hook(est, eid, (:event_stats_cb, :likes, +1))
-                            event_pubkey_action(est, eid, e.pubkey, :liked)
+                            event_pubkey_action(est, eid, e, :liked)
                             ext_reaction(est, e, eid)
                         end
                     end
@@ -849,7 +865,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                 event_hook(est, parent_eid, (:event_stats_cb, :replies, +1))
                 exe(est.event_replies, @sql("insert into kv (event_id, reply_event_id, reply_created_at) values (?1, ?2, ?3)"),
                     parent_eid, e.id, e.created_at)
-                event_pubkey_action(est, parent_eid, e.pubkey, :replied)
+                event_pubkey_action(est, parent_eid, e, :replied)
                 est.event_thread_parents[e.id] = parent_eid
                 ext_reply(est, e, parent_eid)
             end
@@ -880,7 +896,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                 if tag.fields[1] == "e"
                     if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
                         event_hook(est, eid, (:event_stats_cb, :reposts, +1))
-                        event_pubkey_action(est, eid, e.pubkey, :reposted)
+                        event_pubkey_action(est, eid, e, :reposted)
                         ext_repost(est, e, eid)
                         break
                     end
@@ -916,7 +932,10 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                 if !isnothing(parent_eid)
                     event_hook(est, parent_eid, (:event_stats_cb, :zaps, +1))
                     ext_zap(est, e, parent_eid, amount_sats)
-                    event_pubkey_action(est, parent_eid, zap_sender(e), :zapped)
+                    event_pubkey_action(est, parent_eid, 
+                                        Nostr.Event(e.id, zap_sender(e), e.created_at, e.kind, 
+                                                    e.tags, e.content, e.sig),
+                                        :zapped)
                 end
                 if !isnothing(zapped_pk)
                     ext_pubkey_zap(est, e, zapped_pk, amount_sats)
