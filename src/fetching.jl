@@ -13,7 +13,9 @@ SAVE_MESSAGES = Ref(true)
 PROXY_URI = Ref{Union{String,Nothing}}(nothing)
 EVENTS_DATA_DIR = Ref{Any}(nothing)
 
-TIMEOUT = Ref(600)
+TIMEOUT = Ref(30)
+BASE_DELAY = Ref(1)
+MAX_DELAY = Ref(300)
 
 Base.@kwdef mutable struct Fetcher <: Utils.Tasked
     active=true
@@ -93,9 +95,7 @@ function nostr_fetch_events(
 
     produce(; event=:started)
 
-    BASE_DELAY = 10
-    MAX_DELAY = 300
-    fe.delay = BASE_DELAY
+    fe.delay = BASE_DELAY[]
     while fe.active
         msg_cnt = Ref(0)
         try
@@ -139,7 +139,7 @@ function nostr_fetch_events(
         fe.ws[] = nothing
 
         fe.active || break
-        fe.delay = msg_cnt[] > 0 ? BASE_DELAY : min(fe.delay*2, MAX_DELAY)
+        fe.delay = msg_cnt[] > 0 ? BASE_DELAY[] : min(fe.delay*2, MAX_DELAY[])
         produce(; event=:sleep, fe.delay, msg_cnt=msg_cnt[])
 
         fe.waiting_delay = true
