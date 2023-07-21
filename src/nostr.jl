@@ -79,6 +79,7 @@ for ty in [EventId, PubKeyId, Sig]
     eval(:($(ty.name.name)(hex::String) = $(ty.name.name)(hex2bytes(hex))))
     eval(:(hex(v::$(ty.name.name)) = bytes2hex(v.$(fieldnames(ty)[1]))))
     eval(:(Base.show(io::IO, v::$(ty.name.name)) = print(io, string($(ty.name.name))*"("*repr(hex(v))*")")))
+    eval(:(Base.isless(a::$(ty.name.name), b::$(ty.name.name)) = Base.isless(a.$(fieldnames(ty)[1]), b.$(fieldnames(ty)[1]))))
 end
 
 JSON.lower(eid::EventId) = hex(eid)

@@ -479,6 +479,14 @@ function user_profile(est::DB.CacheStorage; pubkey)
     res.wrapped
 end
 
+function parse_event_from_user(event_from_user::Dict)
+    e = Nostr.Event(event_from_user)
+    # e.created_at > time() - 300 || error("event is too old")
+    # e.created_at < time() + 300 || error("event from the future")
+    Nostr.verify(e) || error("verification failed")
+    e
+end
+
 function get_directmsg_count(est::DB.CacheStorage; receiver, sender=nothing)
     receiver = cast(receiver, Nostr.PubKeyId)
     sender = castmaybe(sender, Nostr.PubKeyId)
@@ -561,9 +569,7 @@ function reset_directmsg_count(est::DB.CacheStorage; event_from_user::Dict, send
 
     replicated || replicate_request(:reset_directmsg_count; event_from_user, sender)
 
-    e = Nostr.Event(event_from_user)
-    e.created_at > time() - 300 || error("event is too old")
-    Nostr.verify(e) || error("verification failed")
+    e = parse_event_from_user(event_from_user)
 
     receiver = e.pubkey
     sender = cast(sender, Nostr.PubKeyId)
@@ -593,9 +599,7 @@ function reset_directmsg_counts(est::DB.CacheStorage; event_from_user::Dict, rep
 
     replicated || replicate_request(:reset_directmsg_counts; event_from_user)
 
-    e = Nostr.Event(event_from_user)
-    e.created_at > time() - 300 || error("event is too old")
-    Nostr.verify(e) || error("verification failed")
+    e = parse_event_from_user(event_from_user)
 
     receiver = e.pubkey
 
