@@ -481,8 +481,8 @@ end
 
 function parse_event_from_user(event_from_user::Dict)
     e = Nostr.Event(event_from_user)
-    # e.created_at > time() - 300 || error("event is too old")
-    # e.created_at < time() + 300 || error("event from the future")
+    e.created_at > time() - 300 || error("event is too old")
+    e.created_at < time() + 300 || error("event from the future")
     Nostr.verify(e) || error("verification failed")
     e
 end
