@@ -13,6 +13,8 @@ SAVE_MESSAGES = Ref(true)
 PROXY_URI = Ref{Union{String,Nothing}}(nothing)
 EVENTS_DATA_DIR = Ref{Any}(nothing)
 
+TIMEOUT = Ref(600)
+
 Base.@kwdef mutable struct Fetcher <: Utils.Tasked
     active=true
     task=nothing
@@ -20,7 +22,7 @@ Base.@kwdef mutable struct Fetcher <: Utils.Tasked
 
     relay_url::String
     proxy::Union{String, Nothing}
-    timeout=5
+    timeout=TIMEOUT[]
     latest_timestamp::Int=0
     filename=nothing
     filename_date=Date(1,1,1)
