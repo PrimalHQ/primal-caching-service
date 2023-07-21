@@ -12,6 +12,7 @@ exposed_functions = Set([:feed,
                          :thread_view,
                          :network_stats,
                          :contact_list,
+                         :is_user_following,
                          :user_infos,
                          :user_followers,
                          :events,
@@ -33,7 +34,7 @@ DIRECTMSG_COUNT=10_000_117
 DIRECTMSG_COUNTS=10_000_118
 EVENT_IDS=10_000_122
 PARTIAL_RESPONSE=10_000_123
-# EVENT_ACTIONS=10_000_116
+IS_USER_FOLLOWING=10_000_125
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = isnothing(value) ? value : cast(value, type)
@@ -362,6 +363,14 @@ function contact_list(est::DB.CacheStorage; pubkey)
     append!(res, user_scores(est, res_meta_data))
     ext_user_infos(est, res, res_meta_data)
     res
+end
+
+function is_user_following(est::DB.CacheStorage; pubkey, user_pubkey)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
+    [(; 
+      kind=Int(IS_USER_FOLLOWING),
+      content=JSON.json(pubkey in follows(est, user_pubkey)))]
 end
 
 function user_infos(est::DB.CacheStorage; pubkeys::Vector)
