@@ -240,7 +240,11 @@ function mon(dt=1.0)
         Utils.clear_screen(bio)
         Utils.move_cursor(1, 1)
         println(bio, "msgcnts: ", [f.message_count[] for f in values(fetchers)]')
-        println(bio, length([f for f in values(fetchers) if f.message_count[] > 0]'), "/", length(fetchers), " relays are providing messages")
+        println(bio, 
+                count([f.message_count[] > 0 for f in values(fetchers)]'), "/", 
+                count([f.waiting_delay for f in values(fetchers)]'), "/", 
+                length(fetchers),
+                " (providing|waiting|total) relays")
         println(bio, "(msgcnt|exccnt|chrrecv|chrsent)/s: ", tots .- prevs)
         println(bio)
         # show(bio, MIME"text/plain"(), GlobalCounters.get())
