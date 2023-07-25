@@ -194,6 +194,7 @@ end
 @thread_safety_wrapper Base.merge!
 @thread_safety_wrapper Base.delete!
 @thread_safety_wrapper Base.copy
+@thread_safety_wrapper Base.copy!
 @thread_safety_wrapper Base.isempty
 @thread_safety_wrapper Base.empty!
 @thread_safety_wrapper Base.filter!
