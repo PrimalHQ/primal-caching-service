@@ -163,6 +163,7 @@ db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Int}) where {K, V} =
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Float64}) where {K, V} = DBConversionFuncs(identity, identity)
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{String}) where {K, V} = DBConversionFuncs(identity, identity)
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Symbol}) where {K, V} = DBConversionFuncs(x->string(x), x->Symbol(x))
+db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Vector{UInt8}}) where {K, V} = DBConversionFuncs(identity, identity)
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Nostr.EventId}) where {K, V} = DBConversionFuncs(eid->collect(eid.hash), eid->Nostr.EventId(eid))
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Nostr.PubKeyId}) where {K, V} = DBConversionFuncs(pk->collect(pk.pk), pk->Nostr.PubKeyId(pk))
 db_conversion_funcs(::Type{ShardedSqliteDict{K, V}}, ::Type{Nostr.Event}) where {K, V} = DBConversionFuncs(JSON.json, e->Nostr.Event(JSON.parse(e)))
