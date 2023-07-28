@@ -381,3 +381,4 @@ wss://tmp-relay.cesc.trade
 wss://wizards.wormrobot.org
 wss://xmr.usenostr.org
 wss://zur.nostr.sx
+wss://soloco.nl
