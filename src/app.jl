@@ -22,6 +22,7 @@ exposed_functions = Set([:feed,
                          :reset_directmsg_count,
                          :reset_directmsg_counts,
                          :get_directmsgs,
+                         :mutelist,
                         ])
 
 EVENT_STATS=10_000_100
@@ -335,9 +336,9 @@ function network_stats(est::DB.CacheStorage)
 end
 
 function user_scores(est::DB.CacheStorage, res_meta_data)
-    [(; kind=Int(USER_SCORES),
-      content=JSON.json(Dict([(Nostr.hex(e.pubkey), get(est.pubkey_followers_cnt, e.pubkey, 0))
-                              for e in collect(res_meta_data)])))]
+    d = Dict([(Nostr.hex(e.pubkey), get(est.pubkey_followers_cnt, e.pubkey, 0))
+              for e in collect(res_meta_data)])
+    isempty(d) ? [] : [(; kind=Int(USER_SCORES), content=JSON.json(d))]
 end
 
 function contact_list(est::DB.CacheStorage; pubkey, extended_response=true)
@@ -633,6 +634,39 @@ function get_directmsgs(
         push!(msgs, (est.events[Nostr.EventId(eid)], created_at))
     end
     vcat([e for (e, _) in msgs], range(msgs, :created_at))
+end
+
+function mutelist(est::DB.CacheStorage; pubkey, extended_response=true)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+
+    res = []
+    push_event(eid) = eid in est.events && push!(res, est.events[eid])
+    pubkey in est.mute_list && push_event(est.mute_list[pubkey])
+    pubkey in est.mute_list_2 && push_event(est.mute_list_2[pubkey])
+
+    if extended_response
+        res_meta_data = Dict()
+        for e in res
+            for tag in e.tags
+                if length(tag.fields) == 2 && tag.fields[1] == "p"
+                    if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                        if !haskey(res_meta_data, pk) && pk in est.meta_data
+                            mdid = est.meta_data[pk]
+                            if mdid in est.events
+                                res_meta_data[pk] = est.events[mdid]
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        res_meta_data = collect(values(res_meta_data))
+        append!(res, res_meta_data)
+        append!(res, user_scores(est, res_meta_data))
+        ext_user_infos(est, res, res_meta_data)
+    end
+
+    res
 end
 
 REPLICATE_TO_SERVERS = []
