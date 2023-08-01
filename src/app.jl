@@ -340,16 +340,8 @@ function user_scores(est::DB.CacheStorage, res_meta_data)
                               for e in collect(res_meta_data)])))]
 end
 
-function contact_list(est::DB.CacheStorage; pubkey)
+function contact_list(est::DB.CacheStorage; pubkey, extended_response=true)
     pubkey = cast(pubkey, Nostr.PubKeyId)
-
-    res_meta_data = Dict() |> ThreadSafe
-    @threads for pk in follows(est, pubkey) 
-        if pk in est.meta_data
-            eid = est.meta_data[pk]
-            eid in est.events && (res_meta_data[pk] = est.events[eid])
-        end
-    end
 
     res = []
 
@@ -358,10 +350,21 @@ function contact_list(est::DB.CacheStorage; pubkey)
         eid in est.events && push!(res, est.events[eid])
     end
 
-    res_meta_data = collect(values(res_meta_data))
-    append!(res, res_meta_data)
-    append!(res, user_scores(est, res_meta_data))
-    ext_user_infos(est, res, res_meta_data)
+    if extended_response
+        res_meta_data = Dict() |> ThreadSafe
+        @threads for pk in follows(est, pubkey) 
+            if pk in est.meta_data
+                eid = est.meta_data[pk]
+                eid in est.events && (res_meta_data[pk] = est.events[eid])
+            end
+        end
+
+        res_meta_data = collect(values(res_meta_data))
+        append!(res, res_meta_data)
+        append!(res, user_scores(est, res_meta_data))
+        ext_user_infos(est, res, res_meta_data)
+    end
+
     res
 end
 
