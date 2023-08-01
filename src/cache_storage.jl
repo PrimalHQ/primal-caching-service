@@ -698,6 +698,8 @@ event_stats_fields_cnt = length(split(event_stats_fields, ','))
 event_stats_insert_q           = sql("insert into kv ($event_stats_fields) values (?1, ?2,  ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)")
 event_stats_by_pubkey_insert_q = sql("insert into kv ($event_stats_fields) values (?2, ?1,  ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)")
 
+already_imported_check_lock = ReentrantLock()
+
 function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
     import_msg_into_storage(msg, est.commons)
 
@@ -714,7 +716,10 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
     e.kind in kindints || return false
     est.verification_enabled && !verify(est, e) && return false
 
-    !force && e.id in est.events && return true
+    already_imported = lock(already_imported_check_lock) do
+        e.id in est.events
+    end
+    !force && already_imported && return true
 
     lock(est.event_processors) do event_processors
         for func in values(event_processors)
