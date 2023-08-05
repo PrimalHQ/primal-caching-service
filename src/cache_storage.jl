@@ -582,6 +582,7 @@ function import_msg_into_storage(msg::String, est::DeduplicatedEventStorage; for
         rethrow()
     end
 
+    e isa Nostr.Event || return false
     verify(est, e) || return false
 
     incr(est, :any)
