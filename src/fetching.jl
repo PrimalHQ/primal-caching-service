@@ -280,12 +280,12 @@ function sanitize_valid_relay_url(url)
     u
 end
 
-function load_relays()
+function load_relays(dir=pwd())
     empty!(relays)
-    for url in readlines("relays-active.txt") # these have sent us an event at least once in the past
+    for url in readlines("$dir/relays-active.txt") # these have sent us an event at least once in the past
         push!(relays, url)
     end
-    for url in vcat([readlines(fn)
+    for url in vcat([readlines("$dir/$fn")
                      for fn in ["relays.txt",
                                 "relays-paid.txt",
                                 "relays-mined-from-events.txt",
