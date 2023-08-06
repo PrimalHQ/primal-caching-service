@@ -75,8 +75,13 @@ function exe(ssd::ShardedDBDict{K, V}, query::Union{Int,String}, k::K, rest...) 
 end
 function exec(ssd::ShardedDBDict{K, V}, query::Union{Int,String}, args=())::Vector where {K, V}
     res = [] |> ThreadSafe
-    @threads for dbconn in ssd.dbconns
-        append!(res, exe(dbconn, query, db_args_mapped(typeof(ssd), args)))
+    f(dbconn) = append!(res, exe(dbconn, query, db_args_mapped(typeof(ssd), args)))
+    if length(ssd.dbconns) == 1
+        f(ssd.dbconns[1])
+    else
+        @threads for dbconn in ssd.dbconns
+            f(dbconn)
+        end
     end
     res.wrapped
 end
