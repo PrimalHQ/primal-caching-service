@@ -834,7 +834,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                     if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
                         c = e.content
                         if isempty(c) || c[1] in "🤙+❤️"
-                            event_hook(est, eid, (:event_stats_cb, :likes, +1))
+                            ext_is_hidden(est, e.id) || event_hook(est, eid, (:event_stats_cb, :likes, +1))
                             event_pubkey_action(est, eid, e, :liked)
                             ext_reaction(est, e, eid)
                         end
@@ -868,7 +868,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
             end
             if !isnothing(parent_eid)
                 incr(est, :replies)
-                event_hook(est, parent_eid, (:event_stats_cb, :replies, +1))
+                ext_is_hidden(est, e.id) || event_hook(est, parent_eid, (:event_stats_cb, :replies, +1))
                 exe(est.event_replies, @sql("insert into kv (event_id, reply_event_id, reply_created_at) values (?1, ?2, ?3)"),
                     parent_eid, e.id, e.created_at)
                 event_pubkey_action(est, parent_eid, e, :replied)
@@ -901,7 +901,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
             for tag in e.tags
                 if tag.fields[1] == "e"
                     if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
-                        event_hook(est, eid, (:event_stats_cb, :reposts, +1))
+                        ext_is_hidden(est, e.id) || event_hook(est, eid, (:event_stats_cb, :reposts, +1))
                         event_pubkey_action(est, eid, e, :reposted)
                         ext_repost(est, e, eid)
                         break
@@ -1295,4 +1295,5 @@ function ext_zap(est::CacheStorage, e, parent_eid, amount_sats) end
 function ext_pubkey_zap(est::CacheStorage, e, zapped_pk, amount_sats) end
 function ext_init(est::CacheStorage) end
 function ext_complete(est::CacheStorage) end
+function ext_is_hidden(est::CacheStorage, eid) false end
 
