@@ -6,6 +6,7 @@ import SHA
 
 struct EventId; hash::StaticArrays.SVector{32, UInt8}; end
 struct PubKeyId; pk::StaticArrays.SVector{32, UInt8}; end
+struct SecKey; sk::StaticArrays.SVector{32, UInt8}; end
 URL = String
 struct Sig; sig::StaticArrays.SVector{64, UInt8}; end
 
@@ -75,6 +76,13 @@ end
 
 Base.Dict(e::Event) = event2dict(e)
 
+function Event(seckey::SecKey, pubkey::PubKeyId, created_at::Int, kind::Int, tags::Vector, content::String)::Event
+    eid = event_id(pubkey, created_at, kind, tags, content)
+    Event(eid,
+          pubkey, created_at, kind, tags, content,
+          Schnorr.generate_signature(collect(seckey.sk), collect(eid.hash)))
+end
+
 for ty in [EventId, PubKeyId, Sig]
     eval(:($(ty.name.name)(hex::String) = $(ty.name.name)(hex2bytes(hex))))
     eval(:(hex(v::$(ty.name.name)) = bytes2hex(v.$(fieldnames(ty)[1]))))
@@ -92,17 +100,26 @@ JSON.lower(tag::TagAny) = tag.fields
 
 include("schnorr.jl")
 
-Schnorr.verify(ctx::Schnorr.Secp256k1Ctx, e::Event) = Schnorr.verify(ctx, collect(e.id.hash), collect(e.pubkey.pk), collect(e.sig.sig))
+function generate_keypair()
+    seckey, pubkey = Schnorr.generate_keypair()
+    SecKey(seckey), PubKeyId(pubkey)
+end
+
+# Schnorr.verify(ctx::Schnorr.Secp256k1Ctx, e::Event) = Schnorr.verify(ctx, collect(e.id.hash), collect(e.pubkey.pk), collect(e.sig.sig))
 Schnorr.verify(e::Event) = Schnorr.verify(collect(e.id.hash), collect(e.pubkey.pk), collect(e.sig.sig))
 
+function event_id(pubkey::PubKeyId, created_at::Int, kind::Int, tags::Vector, content::String)::EventId
+    [0,
+     pubkey,
+     created_at,
+     kind,
+     tags,
+     content,
+    ] |> JSON.json |> IOBuffer |> SHA.sha256 |> EventId
+end
+
 function verify(e::Event)
-    e.id == ([0,
-              e.pubkey,
-              e.created_at,
-              e.kind,
-              e.tags,
-              e.content,
-             ] |> JSON.json |> IOBuffer |> SHA.sha256 |> EventId) || return false
+    e.id == event_id(e.pubkey, e.created_at, e.kind, e.tags, e.content) || return false
     Schnorr.verify(e) || return false
     true
 end
