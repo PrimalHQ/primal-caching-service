@@ -23,6 +23,7 @@ exposed_functions = Set([:feed,
                          :reset_directmsg_counts,
                          :get_directmsgs,
                          :mutelist,
+                         :import_event,
                         ])
 
 EVENT_STATS=10_000_100
@@ -36,6 +37,7 @@ DIRECTMSG_COUNTS=10_000_118
 EVENT_IDS=10_000_122
 PARTIAL_RESPONSE=10_000_123
 IS_USER_FOLLOWING=10_000_125
+EVENT_IMPORT_STATUS=10_000_127
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = isnothing(value) ? value : cast(value, type)
@@ -667,6 +669,22 @@ function mutelist(est::DB.CacheStorage; pubkey, extended_response=true)
     end
 
     res
+end
+
+function import_events(est::DB.CacheStorage; events::Vector=[])
+    cnt = Ref(0)
+    errcnt = Ref(0)
+    for e in events
+        try
+            msg = JSON.json([time(), nothing, ["EVENT", "", e]])
+            if DB.import_msg_into_storage(msg, est)
+                cnt[] += 1
+            end
+        catch _ 
+            errcnt[] += 1
+        end
+    end
+    [(; kind=Int(EVENT_IMPORT_STATUS), content=JSON.json((; imported=cnt[], errors=errcnt[])))]
 end
 
 REPLICATE_TO_SERVERS = []
