@@ -83,7 +83,7 @@ function Event(seckey::SecKey, pubkey::PubKeyId, created_at::Int, kind::Int, tag
           Schnorr.generate_signature(collect(seckey.sk), collect(eid.hash)))
 end
 
-for ty in [EventId, PubKeyId, Sig]
+for ty in [EventId, SecKey, PubKeyId, Sig]
     eval(:($(ty.name.name)(hex::String) = $(ty.name.name)(hex2bytes(hex))))
     eval(:(hex(v::$(ty.name.name)) = bytes2hex(v.$(fieldnames(ty)[1]))))
     eval(:(Base.show(io::IO, v::$(ty.name.name)) = print(io, string($(ty.name.name))*"("*repr(hex(v))*")")))
