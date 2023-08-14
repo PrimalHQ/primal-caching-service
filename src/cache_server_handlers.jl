@@ -14,10 +14,10 @@ PRINT_EXCEPTIONS = Ref(false)
 Tsubid = String
 Tfilters = Vector{Any}
 struct Conn
-    ws::WebSocket
-    subs::Dict{Tsubid, Tfilters}
+    ws::ThreadSafe{WebSocket}
+    subs::ThreadSafe{Dict{Tsubid, Tfilters}}
 end
-conns = Dict{WebSocket, ThreadSafe{Conn}}() |> ThreadSafe
+conns = Dict{WebSocket, Conn}() |> ThreadSafe
 
 exceptions = CircularBuffer(200) |> ThreadSafe
 
@@ -29,10 +29,10 @@ requests_per_period = Ref(0) |> ThreadSafe
 function ext_on_connect(ws) end
 function ext_on_disconnect(ws) end
 function ext_periodic() end
-function ext_funcall(funcall, kwargs, kwargs_extra, ws) end
+function ext_funcall(funcall, kwargs, kwargs_extra, ws_id) end
 
 function on_connect(ws)
-    conns[ws] = ThreadSafe(Conn(ws, Dict{Tsubid, Tfilters}()))
+    conns[ws] = Conn(ThreadSafe(ws), ThreadSafe(Dict{Tsubid, Tfilters}()))
     ext_on_connect(ws)
 end
 
@@ -48,13 +48,11 @@ function on_client_message(ws, msg)
         if d[1] == "REQ"
             subid = d[2]
             filters = d[3:end]
-            lock(conn) do conn
-                conn.subs[subid] = filters
-                initial_filter_handler(conn.ws, subid, filters)
-            end
+            conn.subs[subid] = filters
+            initial_filter_handler(conn, subid, filters)
         elseif d[1] == "CLOSE"
             subid = d[2]
-            lock(conn) do conn; delete!(conn.subs, subid); end
+            delete!(conn.subs, subid)
         end
     catch _
         PRINT_EXCEPTIONS[] && Utils.print_exceptions()
@@ -71,33 +69,40 @@ end
 function send(ws::WebSocket, s::String)
     WebSockets.send(ws, s)
 end
-function send(conn::ThreadSafe{Conn}, s::String)
-    lock(conn) do conn
+function send(conn::Conn, s::String)
+    lock(conn.ws) do ws
         lock(sendcnt) do sendcnt; sendcnt[] += 1; end
-        WebSockets.send(conn.ws, s)
-        lock(sendcnt) do sendcnt; sendcnt[] -= 1; end
+        try
+            WebSockets.send(ws, s)
+        finally
+            lock(sendcnt) do sendcnt; sendcnt[] -= 1; end
+        end
     end
 end
 
 est() = Main.eval(:(cache_storage))
 App() = Main.eval(:(App))
 
-function initial_filter_handler(ws::WebSocket, subid, filters)
-    ws_id = ws.id
+function initial_filter_handler(conn::Conn, subid, filters)
+    ws_id = lock(conn.ws) do ws; ws.id; end
 
     function sendres(res::Vector)
-        for d in res
-            send(ws, JSON.json(["EVENT", subid, d]))
+        lock(conn.ws) do ws
+            for d in res
+                send(ws, JSON.json(["EVENT", subid, d]))
+            end
+            send(ws, JSON.json(["EOSE", subid]))
         end
-        send(ws, JSON.json(["EOSE", subid]))
     end
     function send_error(s::String)
-        send(ws, JSON.json(["NOTICE", subid, s]))
-        send(ws, JSON.json(["EOSE", subid]))
+        lock(conn.ws) do ws
+            send(ws, JSON.json(["NOTICE", subid, s]))
+            send(ws, JSON.json(["EOSE", subid]))
+        end
     end
 
     function app_funcall(funcall::Symbol, kwargs; kwargs_extra=Pair{Symbol, Any}[])
-        ext_funcall(funcall, kwargs, kwargs_extra, ws)
+        ext_funcall(funcall, kwargs, kwargs_extra, ws_id)
         MetricsLogger.log(r->begin
                               lock(max_request_duration) do max_request_duration
                                   max_request_duration[] = max(max_request_duration[], r.time)
@@ -150,26 +155,37 @@ end
 
 function close_connections()
     println("closing all websocket connections")
-    lock(conns) do conns
-        @sync for conn in collect(values(conns))
-            @async try lock(conn) do conn; close(conn.ws); end catch _ end
+    @sync for conn in collect(values(conns))
+        @async try lock(conn.ws) do ws; close(ws); end catch _ end
+    end
+end
+
+function with_broadcast(body::Function, scope::Symbol)
+    for conn in collect(values(conns))
+        lock(conn.subs) do subs
+            for (subid, filters) in subs
+                for filt in filters
+                    try
+                        if body(conn, subid, filt) == true
+                            @goto next
+                        end
+                    catch ex
+                        push!(exceptions, (scope, filt, ex))
+                    end
+                end
+                @label next
+            end
         end
     end
 end
 
 function broadcast_network_stats(d)
-    for conn in collect(values(conns))
-        for (subid, filters) in lock(conn) do conn; conn.subs; end
-            for filt in filters
-                if haskey(filt, "cache")
-                    local filt = filt["cache"]
-                    if "net_stats" in filt
-                        @async send(conn, JSON.json(["EVENT", subid, d]))
-                        @goto next
-                    end
-                end
+    with_broadcast(:broadcast_network_stats) do conn, subid, filt
+        if haskey(filt, "cache")
+            if "net_stats" in filt["cache"]
+                @async send(conn, JSON.json(["EVENT", subid, d]))
+                return true
             end
-            @label next
         end
     end
 end
@@ -219,41 +235,28 @@ function netstats_stop()
 end
 
 function broadcast_directmsg_count()
-    for conn in collect(values(conns))
-        for (subid, filters) in lock(conn) do conn; conn.subs; end
-            for filt in filters
-                try
-                    if haskey(filt, "cache")
-                        filt = filt["cache"]
-                        if length(filt) >= 2 && filt[1] == "directmsg_count"
-                            pubkey = Nostr.PubKeyId(filt[2]["pubkey"])
-                            for d in Base.invokelatest(App().get_directmsg_count, est(); receiver=pubkey)
-                                @async send(conn, JSON.json(["EVENT", subid, d]))
-                            end
-                            @goto next
-                        end
-                    end
-                catch ex
-                    push!(exceptions, (:directmsg_counts, filt, ex))
+    with_broadcast(:broadcast_directmsg_count) do conn, subid, filt
+        if haskey(filt, "cache")
+            filt = filt["cache"]
+            if length(filt) >= 2 && filt[1] == "directmsg_count"
+                pubkey = Nostr.PubKeyId(filt[2]["pubkey"])
+                for d in Base.invokelatest(App().get_directmsg_count, est(); receiver=pubkey)
+                    @async send(conn, JSON.json(["EVENT", subid, d]))
                 end
+                return true
             end
-            @label next
         end
     end
 end
 
 function broadcast(e::Nostr.Event)
     EVENT_IDS = App().EVENT_IDS
-    for conn in collect(values(conns))
-        for (subid, filters) in lock(conn) do conn; conn.subs; end
-            for filt in filters
-                if length(filt) == 1
-                    if haskey(filt, "since")
-                        @async send(conn, JSON.json(["EVENT", subid, e]))
-                    elseif get(filt, "idsonly", nothing) == true
-                        @async send(conn, JSON.json(["EVENT", subid, (; kind=Int(EVENT_IDS), ids=[e.id])]))
-                    end
-                end
+    with_broadcast(:broadcast) do conn, subid, filt
+        if length(filt) == 1
+            if haskey(filt, "since")
+                @async send(conn, JSON.json(["EVENT", subid, e]))
+            elseif get(filt, "idsonly", nothing) == true
+                @async send(conn, JSON.json(["EVENT", subid, (; kind=Int(EVENT_IDS), ids=[e.id])]))
             end
         end
     end
