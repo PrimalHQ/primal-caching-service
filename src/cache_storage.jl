@@ -911,7 +911,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
 
             fetch_missing_events(est, e)
 
-        elseif e.kind == Int(Nostr.ZAP_NOTE)
+        elseif e.kind == Int(Nostr.ZAP_RECEIPT)
             # TODO zap auth
             amount_sats = 0
             parent_eid = nothing
