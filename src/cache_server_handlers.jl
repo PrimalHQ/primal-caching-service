@@ -83,6 +83,25 @@ end
 est() = Main.eval(:(cache_storage))
 App() = Main.eval(:(App))
 
+function app_funcall(funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol, Any}[], subid=nothing, ws_id=nothing)
+    ext_funcall(funcall, kwargs, kwargs_extra, ws_id)
+    MetricsLogger.log(r->begin
+                          lock(max_request_duration) do max_request_duration
+                              max_request_duration[] = max(max_request_duration[], r.time)
+                          end
+                          lock(requests_per_period) do requests_per_period
+                              requests_per_period[] += 1
+                          end
+                          (; funcall, kwargs, ws=string(ws_id), subid)
+                      end) do
+    fetch(Threads.@spawn with_time_limit() do time_exceeded
+              funcall in [:feed] && push!(kwargs, :time_exceeded=>time_exceeded)
+              vcat(Base.invokelatest(getproperty(App(), funcall), est(); kwargs..., kwargs_extra...),
+                   time_exceeded() ? [(; kind=App().PARTIAL_RESPONSE)] : [])
+          end)
+    end |> sendres
+end
+
 function initial_filter_handler(conn::Conn, subid, filters)
     ws_id = lock(conn.ws) do ws; ws.id; end
 
@@ -101,25 +120,6 @@ function initial_filter_handler(conn::Conn, subid, filters)
         end
     end
 
-    function app_funcall(funcall::Symbol, kwargs; kwargs_extra=Pair{Symbol, Any}[])
-        ext_funcall(funcall, kwargs, kwargs_extra, ws_id)
-        MetricsLogger.log(r->begin
-                              lock(max_request_duration) do max_request_duration
-                                  max_request_duration[] = max(max_request_duration[], r.time)
-                              end
-                              lock(requests_per_period) do requests_per_period
-                                  requests_per_period[] += 1
-                              end
-                              (; funcall, kwargs, ws=string(ws_id), subid)
-                          end) do
-        fetch(Threads.@spawn with_time_limit() do time_exceeded
-                  funcall in [:feed] && push!(kwargs, :time_exceeded=>time_exceeded)
-                  vcat(Base.invokelatest(getproperty(App(), funcall), est(); kwargs..., kwargs_extra...),
-                       time_exceeded() ? [(; kind=App().PARTIAL_RESPONSE)] : [])
-              end)
-        end |> sendres
-    end
-
     try
         for filt in filters
             if haskey(filt, "cache")
@@ -128,7 +128,7 @@ function initial_filter_handler(conn::Conn, subid, filters)
                 if !(funcall in [:net_stats, :notifications, :notification_counts, :directmsg_count])
                     @assert funcall in App().exposed_functions
                     kwargs = [Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
-                    app_funcall(funcall, kwargs)
+                    app_funcall(funcall, kwargs, sendres; subid, ws_id=ws_id)
                 end
 
             elseif haskey(filt, "ids")
@@ -136,7 +136,7 @@ function initial_filter_handler(conn::Conn, subid, filters)
                 for s in filt["ids"]
                     try push!(eids, Nostr.EventId(s)) catch _ end
                 end
-                app_funcall(:events, [:event_ids=>eids])
+                app_funcall(:events, [:event_ids=>eids], sendres; subid, ws_id=ws_id)
 
             elseif haskey(filt, "since") || haskey(filt, "until")
                 kwargs = []
