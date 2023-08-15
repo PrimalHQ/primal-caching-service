@@ -40,7 +40,7 @@ IS_USER_FOLLOWING=10_000_125
 EVENT_IMPORT_STATUS=10_000_127
 
 cast(value, type) = value isa type ? value : type(value)
-castmaybe(value, type) = isnothing(value) ? value : cast(value, type)
+castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
 
 function range(res::Vector, order_by)
     if isempty(res)
