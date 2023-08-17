@@ -165,3 +165,5 @@ function nip19_decode_wo_tlv(data)
     d isa Vector && (d = [v for (t, v) in d if t == Bech32.Special][1])
     d
 end
+
+end
