@@ -1,5 +1,7 @@
 module Bech32
 
+import ..Nostr
+
 @enum Encoding::UInt8 begin
     BECH32 = 1
     BECH32M = 2
@@ -51,7 +53,7 @@ function bech32_decode(bech)
     end
     bech = lowercase(bech)
     pos = findlast('1', bech)
-    if isnothing(pos) || pos + 6 > length(bech) || length(bech) > 90
+    if isnothing(pos) || pos + 6 > length(bech) #|| length(bech) > 90
         return (nothing, nothing, nothing)
     end
     if !all([x in CHARSET for x in bech[pos+1:end]])
@@ -104,5 +106,62 @@ end
 function encode(hrp, data)
     bech32_encode(hrp, convertbits(data, 8, 5), BECH32)
 end
+##
+@enum TLVType::UInt8 begin
+    Special=0
+    Relay=1
+    Author=2
+    Kind=3
+end
+##
+function nip19_decode(data)
+    function tlvs(prefix, data)
+        items = []
+        i = 1
+        while i <= length(data)
+            t = TLVType(data[i]); i+=1
+            l = data[i]; i+=1
+            v = data[i:i+l-1]; i+=l
+            if t == Special
+                v = if prefix == "nprofile"; Nostr.PubKeyId(v)
+                elseif prefix == "nevent"; Nostr.EventId(v)
+                elseif prefix == "nrelay"; String(v)
+                elseif prefix == "naddr"; String(v)
+                end
+            elseif t == Relay
+                v = String(v)
+            elseif t == Author
+                v = if prefix == "naddr"; Nostr.PubKeyId(v)
+                elseif prefix == "nevent"; Nostr.PubKeyId(v)
+                end
+            elseif t == Kind
+                v = if prefix == "naddr"; ntoh(read(IOBuffer(v), UInt32)) |> Int
+                elseif prefix == "nevent"; ntoh(read(IOBuffer(v), UInt32)) |> Int
+                end
+            end
+            push!(items, (t, v))
+        end
+        items
+    end
+    for (prefix, ty) in [
+                         ("npub", Nostr.PubKeyId),
+                         ("nsec", Nostr.SecKey),
+                         ("note", Nostr.EventId),
+                        ]
+        startswith(data, prefix) && return ty(decode(prefix, data))
+    end
+    for prefix in [
+                   "nprofile",
+                   "nevent",
+                   "nrelay",
+                   "naddr",
+                  ]
+        startswith(data, prefix) && return tlvs(prefix, decode(prefix, data))
+    end
+end
 
+function nip19_decode_wo_tlv(data)
+    d = nip19_decode(data)
+    d isa Vector && (d = [v for (t, v) in d if t == Bech32.Special][1])
+    d
 end

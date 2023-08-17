@@ -14,6 +14,7 @@ import ..Utils
 using ..Utils: ThreadSafe, Throttle, GCTask, stop
 
 import ..Nostr
+import ..Bech32
 import ..Fetching
 
 include("sqlite.jl")
@@ -521,7 +522,8 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkey
     for m in eachmatch(re_mention, e.content)
         s = m.captures[1]
         catch_exception(est, e, m) do
-            if !isnothing(local id = try Nostr.bech32_decode(s) catch _ end)
+            if !isnothing(local id = try Bech32.nip19_decode_wo_tlv(s) catch _ end)
+                id isa Nostr.PubKeyId || id isa Nostr.EventId || return
                 id isa Nostr.PubKeyId && !pubkeys_in_content && return
                 push!(mentiontags, Nostr.TagAny([id isa Nostr.PubKeyId ? "p" : "e", Nostr.hex(id)]))
             end
