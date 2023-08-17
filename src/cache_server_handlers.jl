@@ -125,10 +125,13 @@ function initial_filter_handler(conn::Conn, subid, filters)
             if haskey(filt, "cache")
                 local filt = filt["cache"]
                 funcall = Symbol(filt[1])
-                if !(funcall in [:net_stats, :notifications, :notification_counts, :directmsg_count])
-                    @assert funcall in App().exposed_functions
+                if funcall in App().exposed_functions
                     kwargs = [Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
                     app_funcall(funcall, kwargs, sendres; subid, ws_id=ws_id)
+                elseif funcall in App().exposed_async_functions
+                    sendres([])
+                else
+                    send_error("unknown api request")
                 end
 
             elseif haskey(filt, "ids")
