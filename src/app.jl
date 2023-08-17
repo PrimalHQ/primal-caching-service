@@ -706,7 +706,7 @@ function zaps_feed(
 
     pubkeys = follows(est, pubkey)
 
-    @threads for p in pubkeys
+    @threads for p in [[pubkey]; pubkeys]
         time_exceeded() && break
         append!(zaps, map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
                                                                    where (sender = ? or receiver = ?) and created_at >= ? and created_at <= ?
@@ -727,10 +727,12 @@ function zaps_feed(
             end
         end
         zap_receipt_id = Nostr.EventId(zap_receipt_id)
-        eid = Nostr.EventId(event_id)
-        push!(res, est.events[eid])
+        if !ismissing(event_id)
+            event_id = Nostr.EventId(event_id)
+            push!(res, est.events[event_id])
+        end
         push!(res, (; kind=Int(ZAP_EVENT), content=JSON.json((; 
-                                                              event_id=eid, 
+                                                              event_id, 
                                                               created_at, 
                                                               sender=castmaybe(sender, Nostr.PubKeyId),
                                                               receiver=castmaybe(receiver, Nostr.PubKeyId),
