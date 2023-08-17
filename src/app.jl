@@ -24,7 +24,12 @@ exposed_functions = Set([:feed,
                          :get_directmsgs,
                          :mutelist,
                          :import_event,
+                         :zaps_feed,
                         ])
+
+exposed_async_functions = Set([:net_stats, 
+                               :directmsg_count,
+                              ])
 
 EVENT_STATS=10_000_100
 NET_STATS=10_000_101
@@ -38,15 +43,16 @@ EVENT_IDS=10_000_122
 PARTIAL_RESPONSE=10_000_123
 IS_USER_FOLLOWING=10_000_125
 EVENT_IMPORT_STATUS=10_000_127
+ZAP_EVENT=10_000_129
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
 
-function range(res::Vector, order_by)
+function range(res::Vector, order_by; by=r->r[2])
     if isempty(res)
         [(; kind=Int(RANGE), content=JSON.json((; order_by)))]
     else
-        [(; kind=Int(RANGE), content=JSON.json((; since=res[end][2], until=res[1][2], order_by)))]
+        [(; kind=Int(RANGE), content=JSON.json((; since=by(res[end]), until=by(res[1]), order_by)))]
     end
 end
 
@@ -685,6 +691,59 @@ function import_events(est::DB.CacheStorage; events::Vector=[])
         end
     end
     [(; kind=Int(EVENT_IMPORT_STATUS), content=JSON.json((; imported=cnt[], errors=errcnt[])))]
+end
+
+function zaps_feed(
+        est::DB.CacheStorage;
+        pubkey,
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+        time_exceeded=()->false,
+    )
+    limit <= 1000 || error("limit too big")
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+
+    zaps = [] |> ThreadSafe
+
+    pubkeys = follows(est, pubkey)
+
+    @threads for p in pubkeys
+        time_exceeded() && break
+        append!(zaps, map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
+                                                                   where (sender = ? or receiver = ?) and created_at >= ? and created_at <= ?
+                                                                   order by created_at desc limit ? offset ?"),
+                                         (p, p, since, until, limit, offset))))
+    end
+
+    zaps = sort(zaps.wrapped, by=z->-z[2])[1:min(limit, length(zaps))]
+
+    res_meta_data = Dict()
+    res = []
+    for (zap_receipt_id, created_at, event_id, sender, receiver, amount_sats) in zaps
+        for pk in [sender, receiver]
+            isnothing(pk) && continue
+            pk = Nostr.PubKeyId(pk)
+            if !haskey(res_meta_data, pk) && pk in est.meta_data
+                res_meta_data[pk] = est.events[est.meta_data[pk]]
+            end
+        end
+        zap_receipt_id = Nostr.EventId(zap_receipt_id)
+        eid = Nostr.EventId(event_id)
+        push!(res, est.events[eid])
+        push!(res, (; kind=Int(ZAP_EVENT), content=JSON.json((; 
+                                                              event_id=eid, 
+                                                              created_at, 
+                                                              sender=castmaybe(sender, Nostr.PubKeyId),
+                                                              receiver=castmaybe(receiver, Nostr.PubKeyId),
+                                                              amount_sats,
+                                                              zap_receipt_id))))
+    end
+
+    res_meta_data = collect(values(res_meta_data))
+    append!(res, res_meta_data)
+    append!(res, user_scores(est, res_meta_data))
+    ext_user_infos(est, res, res_meta_data)
+
+    vcat(res, range(zaps, :created_at))
 end
 
 REPLICATE_TO_SERVERS = []

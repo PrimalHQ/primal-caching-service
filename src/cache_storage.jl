@@ -372,6 +372,22 @@ Base.@kwdef struct CacheStorage <: EventStorage
                                                           ])
     pubkey_directmsgs_cnt_lock = ReentrantLock()
 
+    zap_receipts = ShardedSqliteSet(Nostr.EventId, "$(commons.directory)/db/zap_receipts"; commons.dbargs...,
+                                   table="zap_receipts", 
+                                   init_queries=["create table if not exists zap_receipts (
+                                                 zap_receipt_id blob not null,
+                                                 created_at int not null,
+                                                 sender blob,
+                                                 receiver blob,
+                                                 amount_sats int not null,
+                                                 event_id blob
+                                                 )",
+                                                 "create index if not exists zap_receipts_sender on zap_receipts (sender asc)",
+                                                 "create index if not exists zap_receipts_receiver on zap_receipts (receiver asc)",
+                                                 "create index if not exists zap_receipts_created_at on zap_receipts (created_at asc)",
+                                                 "create index if not exists zap_receipts_event_id on zap_receipts (event_id asc)",
+                                                ])
+
     ext = Ref{Any}(nothing)
     dyn = Dict()
 end
@@ -937,6 +953,8 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
             if amount_sats > 0
                 incr(est, :zaps)
                 incr(est, :satszapped; by=amount_sats)
+                exe(est.zap_receipts, @sql("insert into zap_receipts (zap_receipt_id, created_at, sender, receiver, amount_sats, event_id) values (?1, ?2, ?3, ?4, ?5, ?6)"),
+                    e.id, e.created_at, try zap_sender(e) catch _ end, zapped_pk, amount_sats, parent_eid)
                 if !isnothing(parent_eid)
                     event_hook(est, parent_eid, (:event_stats_cb, :zaps, +1))
                     ext_zap(est, e, parent_eid, amount_sats)
