@@ -695,18 +695,17 @@ end
 
 function zaps_feed(
         est::DB.CacheStorage;
-        pubkey,
+        pubkeys,
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
         time_exceeded=()->false,
     )
     limit <= 1000 || error("limit too big")
-    pubkey = cast(pubkey, Nostr.PubKeyId)
+    pubkeys = [cast(pubkey, Nostr.PubKeyId) for pubkey in pubkeys]
+
+    pks = collect(union(pubkeys, [follows(est, pubkey) for pubkey in pubkeys]...))
 
     zaps = [] |> ThreadSafe
-
-    pubkeys = follows(est, pubkey)
-
-    @threads for p in [[pubkey]; pubkeys]
+    @threads for p in pks
         time_exceeded() && break
         append!(zaps, map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
                                                                    where (sender = ? or receiver = ?) and created_at >= ? and created_at <= ?
@@ -714,7 +713,7 @@ function zaps_feed(
                                          (p, p, since, until, limit, offset))))
     end
 
-    zaps = sort(zaps.wrapped, by=z->-z[2])[1:min(limit, length(zaps))]
+    zaps = sort(collect(OrderedSet(zaps.wrapped)), by=z->-z[2])[1:min(limit, length(zaps))]
 
     res_meta_data = Dict()
     res = []
