@@ -713,19 +713,20 @@ function zaps_feed(
                                          (p, p, since, until, limit, offset))))
     end
 
-    zaps = sort(collect(OrderedSet(zaps.wrapped)), by=z->-z[2])[1:min(limit, length(zaps))]
+    zaps = sort(zaps.wrapped, by=z->-z[2])[1:min(limit, length(zaps))]
 
     res_meta_data = Dict()
     res = []
     for (zap_receipt_id, created_at, event_id, sender, receiver, amount_sats) in zaps
         for pk in [sender, receiver]
-            isnothing(pk) && continue
+            (isnothing(pk) || ismissing(pk)) && continue
             pk = Nostr.PubKeyId(pk)
             if !haskey(res_meta_data, pk) && pk in est.meta_data
                 res_meta_data[pk] = est.events[est.meta_data[pk]]
             end
         end
         zap_receipt_id = Nostr.EventId(zap_receipt_id)
+        push!(res, est.events[zap_receipt_id])
         if !ismissing(event_id)
             event_id = Nostr.EventId(event_id)
             push!(res, est.events[event_id])
@@ -744,7 +745,7 @@ function zaps_feed(
     append!(res, user_scores(est, res_meta_data))
     ext_user_infos(est, res, res_meta_data)
 
-    vcat(res, range(zaps, :created_at))
+    [collect(OrderedSet(res)); range(zaps, :created_at)]
 end
 
 REPLICATE_TO_SERVERS = []
