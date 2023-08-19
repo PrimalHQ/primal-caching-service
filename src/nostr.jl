@@ -76,6 +76,9 @@ end
 
 Base.Dict(e::Event) = event2dict(e)
 
+Base.:(==)(e1::Event, e2::Event) = e1.id == e2.id
+Base.hash(e::Event, h::UInt) = hash(e.id.hash, h)
+
 function Event(seckey::SecKey, pubkey::PubKeyId, created_at::Int, kind::Int, tags::Vector, content::String)::Event
     eid = event_id(pubkey, created_at, kind, tags, content)
     Event(eid,
