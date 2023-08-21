@@ -735,10 +735,15 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
     e.kind in kindints || return false
     est.verification_enabled && !verify(est, e) && return false
 
-    already_imported = lock(already_imported_check_lock) do
-        e.id in est.events
+    should_import = lock(already_imported_check_lock) do
+        if e.id in est.event_ids || !ext_preimport_check(est, e)
+            false
+        else
+            push!(est.event_ids, e.id)
+            true
+        end
     end
-    !force && already_imported && return true
+    (force || should_import) || return false
 
     lock(est.event_processors) do event_processors
         for func in values(event_processors)
@@ -748,12 +753,9 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
         end
     end
 
-    ext_preimport_check(est, e) || return false
-
     incr(est, :any)
 
     est.events[e.id] = e
-    push!(est.event_ids, e.id)
     est.event_created_at[e.id] = e.created_at
 
 
