@@ -23,7 +23,7 @@ exposed_functions = Set([:feed,
                          :reset_directmsg_counts,
                          :get_directmsgs,
                          :mutelist,
-                         :import_event,
+                         :import_events,
                          :zaps_feed,
                         ])
 
