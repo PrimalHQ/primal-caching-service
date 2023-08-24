@@ -697,6 +697,7 @@ function zaps_feed(
         est::DB.CacheStorage;
         pubkeys,
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+        kinds=nothing,
         time_exceeded=()->false,
     )
     limit <= 1000 || error("limit too big")
@@ -745,7 +746,13 @@ function zaps_feed(
     append!(res, user_scores(est, res_meta_data))
     ext_user_infos(est, res, res_meta_data)
 
-    [collect(OrderedSet(res)); range(zaps, :created_at)]
+    res_ = []
+    for e in [collect(OrderedSet(res)); range(zaps, :created_at)]
+        if isnothing(kinds) || (hasproperty(e, :kind) && getproperty(e, :kind) in kinds)
+            push!(res_, e)
+        end
+    end
+    res_
 end
 
 REPLICATE_TO_SERVERS = []
