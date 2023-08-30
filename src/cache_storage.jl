@@ -343,6 +343,19 @@ Base.@kwdef struct CacheStorage <: EventStorage
 
     mute_list   = ShardedSqliteDict{Nostr.PubKeyId, Nostr.EventId}("$(commons.directory)/db/mute_list"; commons.dbargs...)
     mute_list_2 = ShardedSqliteDict{Nostr.PubKeyId, Nostr.EventId}("$(commons.directory)/db/mute_list_2"; commons.dbargs...)
+    mute_lists  = ShardedSqliteDict{Nostr.PubKeyId, Nostr.EventId}("$(commons.directory)/db/mute_lists"; commons.dbargs...)
+    allow_list  = ShardedSqliteDict{Nostr.PubKeyId, Nostr.EventId}("$(commons.directory)/db/allow_list"; commons.dbargs...)
+    parameterized_replaceable_list = ShardedSqliteSet(Nostr.PubKeyId, "$(commons.directory)/db/parameterized_replaceable_list"; commons.dbargs...,
+                                                      table="parameterized_replaceable_list", 
+                                                      init_queries=["create table if not exists parameterized_replaceable_list (
+                                                                    pubkey blob not null,
+                                                                    identifier text not null,
+                                                                    created_at integer not null,
+                                                                    event_id blob not null
+                                                                    )",
+                                                                    "create index if not exists parameterized_replaceable_list_pubkey on     parameterized_replaceable_list (pubkey asc)",
+                                                                    "create index if not exists parameterized_replaceable_list_identifier on parameterized_replaceable_list (identifier asc)",
+                                                                    "create index if not exists parameterized_replaceable_list_created_at on parameterized_replaceable_list (created_at desc)"])
 
     pubkey_directmsgs = ShardedSqliteSet(Nostr.PubKeyId, "$(commons.directory)/db/pubkey_directmsgs"; commons.dbargs...,
                                          table="pubkey_directmsgs", keycolumn="receiver", valuecolumn="event_id",
@@ -718,6 +731,7 @@ event_stats_insert_q           = sql("insert into kv ($event_stats_fields) value
 event_stats_by_pubkey_insert_q = sql("insert into kv ($event_stats_fields) values (?2, ?1,  ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)")
 
 already_imported_check_lock = ReentrantLock()
+parameterized_replaceable_list_lock = ReentrantLock()
 
 function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
     import_msg_into_storage(msg, est.commons)
@@ -977,12 +991,24 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                     if tag.fields[1] == "d" && tag.fields[2] == "mute"
                         est.mute_list_2[e.pubkey] = e.id
                         break
+                    elseif tag.fields[1] == "d" && tag.fields[2] == "mutelists"
+                        est.mute_lists[e.pubkey] = e.id
+                        break
+                    elseif tag.fields[1] == "d" && tag.fields[2] == "allowlist"
+                        est.allow_list[e.pubkey] = e.id
+                        break
+                    else tag.fields[1] == "d"
+                        identifier = tag.fields[2]
+                        lock(parameterized_replaceable_list_lock) do
+                            DB.exe(est.parameterized_replaceable_list, @sql("delete from parameterized_replaceable_list where pubkey = ?1 and identifier = ?2"), e.pubkey, identifier)
+                            DB.exe(est.parameterized_replaceable_list, @sql("insert into parameterized_replaceable_list values (?1,?2,?3,?4)"), e.pubkey, identifier, e.created_at, e.id)
+                        end
+                        break
                     end
                 end
             end
         end
     end
-
 
     for (funcall,) in exe(est.event_hooks, @sql("select funcall from kv where event_id = ?1"), e.id)
         event_hook_execute(est, e, Tuple(JSON.parse(funcall)))

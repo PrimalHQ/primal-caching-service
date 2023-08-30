@@ -23,6 +23,10 @@ exposed_functions = Set([:feed,
                          :reset_directmsg_counts,
                          :get_directmsgs,
                          :mutelist,
+                         :mutelists,
+                         :allowlist,
+                         :parameterized_replaceable_list,
+                         :search_filterlist,
                          :import_events,
                         ])
 
@@ -43,6 +47,7 @@ PARTIAL_RESPONSE=10_000_123
 IS_USER_FOLLOWING=10_000_125
 EVENT_IMPORT_STATUS=10_000_127
 ZAP_EVENT=10_000_129
+FILTERING_REASON=10_000_131
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -108,38 +113,128 @@ function event_actions(est::DB.CacheStorage; event_id, user_pubkey, kind::Int, l
     user_infos(est; pubkeys=pks)
 end
 
-TMuteList = Set{Nostr.PubKeyId}
-TMuteListHash = Vector{UInt8}
-compiled_mute_lists = Dict{Nostr.PubKeyId, Tuple{TMuteListHash, TMuteList}}() |> ThreadSafe
+THash = Vector{UInt8}
+parsed_mutelists = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, Any}}() |> ThreadSafe
+compiled_content_moderation_rules = Dict{Nostr.PubKeyId, Tuple{THash, Any}}() |> ThreadSafe
 
-function compile_mute_list(est::DB.CacheStorage, pubkey)
-    mute_list = TMuteList()
-    if !isnothing(pubkey)
-        eids = Set{Nostr.EventId}()
-        for pk in [pubkey, ext_user_mute_lists(est, pubkey)...]
-            pk in est.mute_list   && push!(eids, est.mute_list[pk])
-            pk in est.mute_list_2 && push!(eids, est.mute_list_2[pk])
+function compile_content_moderation_rules(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
+    cmr = (; 
+           pubkeys = Dict{Nostr.PubKeyId, NamedTuple{(:parent, :scopes), Tuple{Nostr.PubKeyId, Set{Symbol}}}}(),
+           groups = Dict{Symbol, NamedTuple{(:scopes,), Tuple{Set{Symbol}}}}(),
+           pubkeys_allowed = Set{Nostr.PubKeyId}(),
+          )
+    settings = ext_user_get_settings(est, pubkey)
+    (isnothing(pubkey) || !settings.apply_content_moderation) && return cmr
+
+    eids = Set{Nostr.EventId}()
+
+    ml = (; 
+          pubkeys = Dict{Nostr.PubKeyId, Set{Symbol}}(),
+          groups = Dict{Symbol, Set{Symbol}}())
+
+    if pubkey in est.mute_lists
+        local mlseid = est.mute_lists[pubkey]
+        push!(eids, mlseid)
+
+        pml = get(parsed_mutelists, pubkey, nothing)
+        if isnothing(pml) || pml[1] != mlseid
+            for tag in est.events[mlseid].tags
+                if length(tag.fields) >= 2
+                    if tag.fields[1] == "p"
+                        scopes = if length(tag.fields) >= 5
+                            Set([Symbol(s) for s in JSON.parse(tag.fields[5])])
+                        else
+                            Set{Symbol}([:content, :trending])
+                        end
+                        if !isempty(scopes)
+                            ml.pubkeys[Nostr.PubKeyId(tag.fields[2])] = scopes
+                        end
+                    # elseif tag.fields[1] == "group"
+                    #     ml.groups[Symbol(tag.fields[2])] = if length(tag.fields) >= 3
+                    #         Set([Symbol(s) for s in JSON.parse(tag.fields[3])])
+                    #     else
+                    #         Set{Symbol}()
+                    #     end
+                    end
+                end
+            end
+            parsed_mutelists[pubkey] = (mlseid, ml)
+        else
+            ml = pml[2]
         end
-        eids = sort(collect(eids))
+    end
 
-        h = SHA.sha256(vcat([0x00], [eid.hash for eid in eids]...))
+    pks = Set{Nostr.PubKeyId}()
 
-        hml = get(compiled_mute_lists, pubkey, nothing)
-        !isnothing(hml) && hml[1] == h && return hml[2]
+    push!(eids, settings.id)
 
-        for eid in eids
-            for tag in est.events[eid].tags
-                if length(tag.fields) >= 2 && tag.fields[1] == "p"
-                    if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-                        push!(mute_list, pk)
+    pubkey in est.mute_lists && push!(eids, est.mute_lists[pubkey])
+    pubkey in est.allow_list && push!(eids, est.allow_list[pubkey])
+
+    for pk in [pubkey; collect(keys(ml.pubkeys))]
+        for tbl in [est.mute_list, est.mute_list_2, est.allow_list]
+            pk in tbl && push!(eids, tbl[pk])
+        end
+    end
+    eids = sort(collect(eids))
+
+    h = SHA.sha256(vcat([0x00], [eid.hash for eid in eids]...))
+
+    cmr_ = get(compiled_content_moderation_rules, pubkey, nothing)
+    !isnothing(cmr_) && cmr_[1] == h && return cmr_[2]
+
+    for ppk in [pubkey, collect(keys(ml.pubkeys))...]
+        for tbl in [est.mute_list, est.mute_list_2]
+            if ppk in tbl
+                for tag in est.events[tbl[ppk]].tags
+                    if length(tag.fields) >= 2 && tag.fields[1] == "p"
+                        if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                            cmr.pubkeys[pk] = (; parent=ppk, 
+                                               scopes=haskey(ml.pubkeys, ppk) ? ml.pubkeys[ppk] : Set{Symbol}())
+                        end
                     end
                 end
             end
         end
-
-        compiled_mute_lists[pubkey] = (h, mute_list)
     end
-    mute_list
+
+    for cm in settings.content_moderation
+        scopes = Set{Symbol}()
+        get(cm, "content", false) && push!(scopes, :content)
+        get(cm, "trending", false) && push!(scopes, :trending)
+        if !isempty(scopes)
+            cmr.groups[Symbol(cm["name"])] = (; scopes)
+        end
+    end
+
+    if pubkey in est.allow_list
+        for tag in est.events[est.allow_list[pubkey]].tags
+            if length(tag.fields) >= 2 && tag.fields[1] == "p"
+                if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                    push!(cmr.pubkeys_allowed, pk)
+                end
+            end
+        end
+    end
+
+    compiled_content_moderation_rules[pubkey] = (h, cmr)
+    cmr
+end
+
+function is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
+    isnothing(user_pubkey) && return false
+    cmr = compile_content_moderation_rules(est, user_pubkey)
+    pubkey in cmr.pubkeys_allowed && return false
+    if haskey(cmr.pubkeys, pubkey)
+        scopes = cmr.pubkeys[pubkey].scopes
+        isempty(scopes) ? true : scope in scopes
+    else
+        ext_is_hidden_by_group(est, user_pubkey, scope, pubkey)
+    end
+end
+function is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId)
+    eid in est.events && is_hidden(est, user_pubkey, scope, est.events[eid].pubkey) && return true
+    ext_is_hidden_by_group(est, user_pubkey, scope, eid)
 end
 
 function response_messages_for_posts(
@@ -151,14 +246,12 @@ function response_messages_for_posts(
     pks = Set{Nostr.PubKeyId}() |> ThreadSafe
     res_meta_data = res_meta_data |> ThreadSafe
 
-    mute_list = compile_mute_list(est, user_pubkey)
-
     function handle_event(body::Function, eid::Nostr.EventId; wrapfun::Function=identity)
         ext_is_hidden(est, eid) && return
         eid in est.deleted_events && return
 
         e = est.events[eid]
-        e.pubkey in mute_list && return
+        is_hidden(est, user_pubkey, :content, e.pubkey) && return
         ext_is_hidden(est, e.pubkey) && return
         push!(res, wrapfun(e))
         union!(res, event_stats(est, e.id))
@@ -264,12 +357,13 @@ end
 
 function thread_view(est::DB.CacheStorage; event_id, user_pubkey=nothing, kwargs...)
     event_id = cast(event_id, Nostr.EventId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
     est.auto_fetch_missing_events && DB.fetch_event(est, event_id)
 
     res = []
 
-    hidden = ext_is_hidden(est, event_id) || event_id in est.deleted_events
+    hidden = is_hidden(est, user_pubkey, :content, event_id) || ext_is_hidden(est, event_id) || event_id in est.deleted_events
 
     hidden || append!(res, thread_view_replies(est; event_id, user_pubkey, kwargs...))
     append!(res, thread_view_parents(est; event_id, user_pubkey))
@@ -381,7 +475,7 @@ function is_user_following(est::DB.CacheStorage; pubkey, user_pubkey)
     user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
     [(; 
       kind=Int(IS_USER_FOLLOWING),
-      content=JSON.json(pubkey in follows(est, user_pubkey)))]
+      content=JSON.json(user_pubkey in follows(est, pubkey)))]
 end
 
 function user_infos(est::DB.CacheStorage; pubkeys::Vector)
@@ -459,8 +553,9 @@ function events(
     end
 end
 
-function user_profile(est::DB.CacheStorage; pubkey)
+function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
     pubkey = cast(pubkey, Nostr.PubKeyId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
     est.auto_fetch_missing_events && DB.fetch_user_metadata(est, pubkey)
 
@@ -487,6 +582,9 @@ function user_profile(est::DB.CacheStorage; pubkey)
                                    reply_count,
                                    time_joined,
                                   ))))
+
+    !isnothing(user_pubkey) && append!(res, search_filterlist(est; pubkey, user_pubkey))
+
     res.wrapped
 end
 
@@ -643,13 +741,14 @@ function get_directmsgs(
     vcat([e for (e, _) in msgs], range(msgs, :created_at))
 end
 
-function mutelist(est::DB.CacheStorage; pubkey, extended_response=true)
+function response_messages_for_list(est::DB.CacheStorage, tables, pubkey, extended_response=true)
     pubkey = cast(pubkey, Nostr.PubKeyId)
 
     res = []
     push_event(eid) = eid in est.events && push!(res, est.events[eid])
-    pubkey in est.mute_list && push_event(est.mute_list[pubkey])
-    pubkey in est.mute_list_2 && push_event(est.mute_list_2[pubkey])
+    for tbl in tables
+        pubkey in tbl && push_event(tbl[pubkey])
+    end
 
     if extended_response
         res_meta_data = Dict()
@@ -674,6 +773,77 @@ function mutelist(est::DB.CacheStorage; pubkey, extended_response=true)
     end
 
     res
+end
+
+function mutelist(est::DB.CacheStorage; pubkey, extended_response=true)
+    response_messages_for_list(est, [est.mute_list, est.mute_list_2], pubkey, extended_response)
+end
+function mutelists(est::DB.CacheStorage; pubkey, extended_response=true)
+    response_messages_for_list(est, [est.mute_lists], pubkey, extended_response)
+end
+function allowlist(est::DB.CacheStorage; pubkey, extended_response=true)
+    response_messages_for_list(est, [est.allow_list], pubkey, extended_response)
+end
+
+function parameterized_replaceable_list(est::DB.CacheStorage; pubkey, identifier::String, extended_response=true)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+
+    res = []
+    for (eid,) in DB.exe(est.parameterized_replaceable_list, DB.@sql("select event_id from parameterized_replaceable_list where pubkey = ?1 and identifier = ?2"), pubkey, identifier)
+        eid = Nostr.EventId(eid)
+        push!(res, est.events[eid])
+    end
+
+    if extended_response
+        res_meta_data = Dict()
+        for e in res
+            for tag in e.tags
+                if length(tag.fields) == 2 && tag.fields[1] == "p"
+                    if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                        if !haskey(res_meta_data, pk) && pk in est.meta_data
+                            mdid = est.meta_data[pk]
+                            if mdid in est.events
+                                res_meta_data[pk] = est.events[mdid]
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        res_meta_data = collect(values(res_meta_data))
+        append!(res, res_meta_data)
+        append!(res, user_scores(est, res_meta_data))
+        ext_user_infos(est, res, res_meta_data)
+    end
+
+    res
+end
+
+function search_filterlist(est::DB.CacheStorage; pubkey, user_pubkey)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
+    cmr = compile_content_moderation_rules(est, user_pubkey)
+    res = nothing
+    if pubkey in cmr.pubkeys_allowed
+        res = (; action=:allow, pubkey=user_pubkey)
+        [est.events[est.meta_data[user_pubkey]], 
+         (; kind=Int(FILTERING_REASON), content=JSON.json(res))]
+    elseif haskey(cmr.pubkeys, pubkey)
+        res = (; action=:block, pubkey=cmr.pubkeys[pubkey].parent)
+        [est.events[est.meta_data[res.pubkey]], 
+         (; kind=Int(FILTERING_REASON), content=JSON.json(res))]
+    else
+        for (grpname, g) in cmr.groups
+            if grpname == :primal_spam && pubkey in Filterlist.access_pubkey_blocked_spam
+                res = (; action=:block, group=grpname)
+                break
+            elseif grpname == :primal_nsfw && any([is_hidden_on_primal_nsfw(est, user_pubkey, scope, pubkey) for scope in [:content, :trending]])
+                res = (; action=:block, group=grpname)
+                break
+            end
+        end
+    end
+    isnothing(res) ? [] : [ (; kind=Int(FILTERING_REASON), content=JSON.json(res))]
 end
 
 function import_events(est::DB.CacheStorage; events::Vector=[])
@@ -706,7 +876,9 @@ end
 
 function ext_user_infos(est::DB.CacheStorage, res, res_meta_data) end
 function ext_is_hidden(est::DB.CacheStorage, eid::Nostr.EventId); false; end
+function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId); false; end
+function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId); false; end
 function ext_event_response(est::DB.CacheStorage, e::Nostr.Event); []; end
-function ext_user_mute_lists(est::DB.CacheStorage, user_pubkey::Nostr.PubKeyId); []; end
+function ext_user_get_settings(est::DB.CacheStorage, pubkey::Nostr.PubKeyId); end
 
 end
