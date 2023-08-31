@@ -28,6 +28,8 @@ exposed_functions = Set([:feed,
                          :parameterized_replaceable_list,
                          :search_filterlist,
                          :import_events,
+                         :zaps_feed,
+                         :user_zaps,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -860,6 +862,104 @@ function import_events(est::DB.CacheStorage; events::Vector=[])
         end
     end
     [(; kind=Int(EVENT_IMPORT_STATUS), content=JSON.json((; imported=cnt[], errors=errcnt[])))]
+end
+
+function response_messages_for_zaps(est, zaps; kinds=nothing)
+    res_meta_data = Dict()
+    res = []
+    for (zap_receipt_id, created_at, event_id, sender, receiver, amount_sats) in zaps
+        for pk in [sender, receiver]
+            (isnothing(pk) || ismissing(pk)) && continue
+            pk = Nostr.PubKeyId(pk)
+            if !haskey(res_meta_data, pk) && pk in est.meta_data
+                res_meta_data[pk] = est.events[est.meta_data[pk]]
+            end
+        end
+        zap_receipt_id = Nostr.EventId(zap_receipt_id)
+        zap_receipt_id in est.events && push!(res, est.events[zap_receipt_id])
+        if !ismissing(event_id)
+            event_id = Nostr.EventId(event_id)
+            event_id in est.events && push!(res, est.events[event_id])
+        end
+        push!(res, (; kind=Int(ZAP_EVENT), content=JSON.json((; 
+                                                              event_id, 
+                                                              created_at, 
+                                                              sender=castmaybe(sender, Nostr.PubKeyId),
+                                                              receiver=castmaybe(receiver, Nostr.PubKeyId),
+                                                              amount_sats,
+                                                              zap_receipt_id))))
+    end
+
+    res_meta_data = collect(values(res_meta_data))
+    append!(res, res_meta_data)
+    append!(res, user_scores(est, res_meta_data))
+    ext_user_infos(est, res, res_meta_data)
+
+    res_ = []
+    for e in [collect(OrderedSet(res)); range(zaps, :created_at)]
+        if isnothing(kinds) || (hasproperty(e, :kind) && getproperty(e, :kind) in kinds)
+            push!(res_, e)
+        end
+    end
+    res_
+end
+
+function zaps_feed(
+        est::DB.CacheStorage;
+        pubkeys,
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+        kinds=nothing,
+        time_exceeded=()->false,
+    )
+    limit=min(50, limit)
+    limit <= 1000 || error("limit too big")
+    pubkeys = [cast(pubkey, Nostr.PubKeyId) for pubkey in pubkeys]
+
+    # pks = collect(union(pubkeys, [follows(est, pubkey) for pubkey in pubkeys]...))
+    pks = pubkeys
+
+    zaps = [] |> ThreadSafe
+    @threads for p in pks
+        time_exceeded() && break
+        append!(zaps, map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
+                                                                   where (sender = ? or receiver = ?) and created_at >= ? and created_at <= ?
+                                                                   order by created_at desc limit ? offset ?"),
+                                         (p, p, since, until, limit, offset))))
+    end
+
+    zaps = sort(zaps.wrapped, by=z->-z[2])[1:min(limit, length(zaps))]
+
+    response_messages_for_zaps(est, zaps; kinds)
+end
+
+function user_zaps(
+        est::DB.CacheStorage;
+        sender=nothing, receiver=nothing,
+        kinds=nothing,
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+    )
+    limit=min(50, limit)
+    limit <= 1000 || error("limit too big")
+    sender = castmaybe(sender, Nostr.PubKeyId)
+    receiver = castmaybe(receiver, Nostr.PubKeyId)
+
+    zaps = if !isnothing(sender)
+        map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
+                                                     where sender = ? and created_at >= ? and created_at <= ?
+                                                     order by created_at desc limit ? offset ?"),
+                           (sender, since, until, limit, offset)))
+    elseif !isnothing(receiver)
+        map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
+                                                     where receiver = ? and created_at >= ? and created_at <= ?
+                                                     order by created_at desc limit ? offset ?"),
+                           (receiver, since, until, limit, offset)))
+    else
+        error("either sender or receiver argument has to be specified")
+    end
+
+    zaps = sort(zaps, by=z->-z[2])[1:min(limit, length(zaps))]
+
+    response_messages_for_zaps(est, zaps; kinds)
 end
 
 REPLICATE_TO_SERVERS = []
