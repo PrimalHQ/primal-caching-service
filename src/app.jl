@@ -2,7 +2,7 @@ module App
 
 import JSON
 using .Threads: @threads
-using DataStructures: OrderedSet
+using DataStructures: OrderedSet, CircularBuffer
 
 import ..DB
 import ..Nostr
@@ -53,6 +53,19 @@ FILTERING_REASON=10_000_131
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
+
+PRINT_EXCEPTIONS = Ref(false)
+exceptions = CircularBuffer(200)
+
+function catch_exception(body::Function, args...; rethrow_exception=false)
+    try
+        body()
+    catch ex
+        push!(exceptions, (time(), ex, args...))
+        PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+        rethrow_exception && rethrow()
+    end
+end
 
 function range(res::Vector, order_by; by=r->r[2])
     if isempty(res)
@@ -125,101 +138,107 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey::Nostr.Pu
            groups = Dict{Symbol, NamedTuple{(:scopes,), Tuple{Set{Symbol}}}}(),
            pubkeys_allowed = Set{Nostr.PubKeyId}(),
           )
-    settings = ext_user_get_settings(est, pubkey)
-    (isnothing(pubkey) || isnothing(settings) || !settings.apply_content_moderation) && return cmr
+    catch_exception(:compile_content_moderation_rules, (; pubkey)) do
+        settings = ext_user_get_settings(est, pubkey)
+        (isnothing(pubkey) || isnothing(settings) || !settings.apply_content_moderation) && return cmr
 
-    eids = Set{Nostr.EventId}()
+        eids = Set{Nostr.EventId}()
 
-    ml = (; 
-          pubkeys = Dict{Nostr.PubKeyId, Set{Symbol}}(),
-          groups = Dict{Symbol, Set{Symbol}}())
+        push!(eids, settings.id)
 
-    if pubkey in est.mute_lists
-        local mlseid = est.mute_lists[pubkey]
-        push!(eids, mlseid)
+        ml = (; 
+              pubkeys = Dict{Nostr.PubKeyId, Set{Symbol}}(),
+              groups = Dict{Symbol, Set{Symbol}}())
 
-        pml = get(parsed_mutelists, pubkey, nothing)
-        if isnothing(pml) || pml[1] != mlseid
-            for tag in est.events[mlseid].tags
-                if length(tag.fields) >= 2
-                    if tag.fields[1] == "p"
-                        scopes = if length(tag.fields) >= 5
-                            Set([Symbol(s) for s in JSON.parse(tag.fields[5])])
-                        else
-                            Set{Symbol}([:content, :trending])
+        if pubkey in est.mute_lists
+            local mlseid = est.mute_lists[pubkey]
+            push!(eids, mlseid)
+
+            pml = get(parsed_mutelists, pubkey, nothing)
+            if isnothing(pml) || pml[1] != mlseid
+                for tag in est.events[mlseid].tags
+                    if length(tag.fields) >= 2
+                        if tag.fields[1] == "p"
+                            scopes = if length(tag.fields) >= 5
+                                Set([Symbol(s) for s in JSON.parse(tag.fields[5])])
+                            else
+                                Set{Symbol}([:content, :trending])
+                            end
+                            if !isempty(scopes)
+                                ml.pubkeys[Nostr.PubKeyId(tag.fields[2])] = scopes
+                            end
+                            # elseif tag.fields[1] == "group"
+                            #     ml.groups[Symbol(tag.fields[2])] = if length(tag.fields) >= 3
+                            #         Set([Symbol(s) for s in JSON.parse(tag.fields[3])])
+                            #     else
+                            #         Set{Symbol}()
+                            #     end
                         end
-                        if !isempty(scopes)
-                            ml.pubkeys[Nostr.PubKeyId(tag.fields[2])] = scopes
+                    end
+                end
+                parsed_mutelists[pubkey] = (mlseid, ml)
+            else
+                ml = pml[2]
+            end
+        end
+
+        pks = Set{Nostr.PubKeyId}()
+
+        push!(eids, settings.id)
+
+        pubkey in est.mute_lists && push!(eids, est.mute_lists[pubkey])
+        pubkey in est.allow_list && push!(eids, est.allow_list[pubkey])
+
+        for pk in [pubkey; collect(keys(ml.pubkeys))]
+            for tbl in [est.mute_list, est.mute_list_2, est.allow_list]
+                pk in tbl && push!(eids, tbl[pk])
+            end
+        end
+        eids = sort(collect(eids))
+
+        h = SHA.sha256(vcat([0x00], [eid.hash for eid in eids]...))
+
+        cmr_ = get(compiled_content_moderation_rules, pubkey, nothing)
+        !isnothing(cmr_) && cmr_[1] == h && return cmr_[2]
+
+        catch_exception(:compile_content_moderation_rules_calc, (; pubkey)) do
+            for ppk in [pubkey, collect(keys(ml.pubkeys))...]
+                for tbl in [est.mute_list, est.mute_list_2]
+                    if ppk in tbl
+                        for tag in est.events[tbl[ppk]].tags
+                            if length(tag.fields) >= 2 && tag.fields[1] == "p"
+                                if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                                    cmr.pubkeys[pk] = (; parent=ppk, 
+                                                       scopes=haskey(ml.pubkeys, ppk) ? ml.pubkeys[ppk] : Set{Symbol}())
+                                end
+                            end
                         end
-                    # elseif tag.fields[1] == "group"
-                    #     ml.groups[Symbol(tag.fields[2])] = if length(tag.fields) >= 3
-                    #         Set([Symbol(s) for s in JSON.parse(tag.fields[3])])
-                    #     else
-                    #         Set{Symbol}()
-                    #     end
                     end
                 end
             end
-            parsed_mutelists[pubkey] = (mlseid, ml)
-        else
-            ml = pml[2]
-        end
-    end
 
-    pks = Set{Nostr.PubKeyId}()
+            for cm in settings.content_moderation
+                scopes = Set([Symbol(s) for s in cm["scopes"]])
+                if !isempty(scopes)
+                    cmr.groups[Symbol(cm["name"])] = (; scopes)
+                end
+            end
 
-    push!(eids, settings.id)
-
-    pubkey in est.mute_lists && push!(eids, est.mute_lists[pubkey])
-    pubkey in est.allow_list && push!(eids, est.allow_list[pubkey])
-
-    for pk in [pubkey; collect(keys(ml.pubkeys))]
-        for tbl in [est.mute_list, est.mute_list_2, est.allow_list]
-            pk in tbl && push!(eids, tbl[pk])
-        end
-    end
-    eids = sort(collect(eids))
-
-    h = SHA.sha256(vcat([0x00], [eid.hash for eid in eids]...))
-
-    cmr_ = get(compiled_content_moderation_rules, pubkey, nothing)
-    !isnothing(cmr_) && cmr_[1] == h && return cmr_[2]
-
-    for ppk in [pubkey, collect(keys(ml.pubkeys))...]
-        for tbl in [est.mute_list, est.mute_list_2]
-            if ppk in tbl
-                for tag in est.events[tbl[ppk]].tags
+            if pubkey in est.allow_list
+                for tag in est.events[est.allow_list[pubkey]].tags
                     if length(tag.fields) >= 2 && tag.fields[1] == "p"
                         if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-                            cmr.pubkeys[pk] = (; parent=ppk, 
-                                               scopes=haskey(ml.pubkeys, ppk) ? ml.pubkeys[ppk] : Set{Symbol}())
+                            push!(cmr.pubkeys_allowed, pk)
                         end
                     end
                 end
             end
         end
+
+        compiled_content_moderation_rules[pubkey] = (h, cmr)
+
+        ext_invalidate_cached_content_moderation(est, pubkey)
     end
-
-    for cm in settings.content_moderation
-        scopes = Set([Symbol(s) for s in cm["scopes"]])
-        if !isempty(scopes)
-            cmr.groups[Symbol(cm["name"])] = (; scopes)
-        end
-    end
-
-    if pubkey in est.allow_list
-        for tag in est.events[est.allow_list[pubkey]].tags
-            if length(tag.fields) >= 2 && tag.fields[1] == "p"
-                if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-                    push!(cmr.pubkeys_allowed, pk)
-                end
-            end
-        end
-    end
-
-    compiled_content_moderation_rules[pubkey] = (h, cmr)
-
-    ext_invalidate_cached_content_moderation(est, pubkey)
 
     cmr
 end
