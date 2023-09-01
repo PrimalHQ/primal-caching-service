@@ -138,7 +138,7 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey::Nostr.Pu
            groups = Dict{Symbol, NamedTuple{(:scopes,), Tuple{Set{Symbol}}}}(),
            pubkeys_allowed = Set{Nostr.PubKeyId}(),
           )
-    catch_exception(:compile_content_moderation_rules, (; pubkey)) do
+    r = catch_exception(:compile_content_moderation_rules, (; pubkey)) do
         settings = ext_user_get_settings(est, pubkey)
         (isnothing(pubkey) || isnothing(settings) || !settings.apply_content_moderation) && return cmr
 
@@ -238,9 +238,10 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey::Nostr.Pu
         compiled_content_moderation_rules[pubkey] = (h, cmr)
 
         ext_invalidate_cached_content_moderation(est, pubkey)
-    end
 
-    cmr
+        cmr
+    end
+    isnothing(r) ? cmr : r
 end
 
 function is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
