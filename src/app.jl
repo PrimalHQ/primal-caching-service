@@ -126,7 +126,7 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey::Nostr.Pu
            pubkeys_allowed = Set{Nostr.PubKeyId}(),
           )
     settings = ext_user_get_settings(est, pubkey)
-    (isnothing(pubkey) || !settings.apply_content_moderation) && return cmr
+    (isnothing(pubkey) || isnothing(settings) || !settings.apply_content_moderation) && return cmr
 
     eids = Set{Nostr.EventId}()
 
@@ -201,9 +201,7 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey::Nostr.Pu
     end
 
     for cm in settings.content_moderation
-        scopes = Set{Symbol}()
-        get(cm, "content", false) && push!(scopes, :content)
-        get(cm, "trending", false) && push!(scopes, :trending)
+        scopes = Set([Symbol(s) for s in cm["scopes"]])
         if !isempty(scopes)
             cmr.groups[Symbol(cm["name"])] = (; scopes)
         end
@@ -220,6 +218,9 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey::Nostr.Pu
     end
 
     compiled_content_moderation_rules[pubkey] = (h, cmr)
+
+    ext_invalidate_cached_content_moderation(est, pubkey)
+
     cmr
 end
 
@@ -585,7 +586,7 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
                                    time_joined,
                                   ))))
 
-    !isnothing(user_pubkey) && append!(res, search_filterlist(est; pubkey, user_pubkey))
+    !isnothing(user_pubkey) && is_hidden(est, user_pubkey, :content, pubkey) && append!(res, search_filterlist(est; pubkey, user_pubkey))
 
     res.wrapped
 end
@@ -980,5 +981,6 @@ function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol
 function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId); false; end
 function ext_event_response(est::DB.CacheStorage, e::Nostr.Event); []; end
 function ext_user_get_settings(est::DB.CacheStorage, pubkey::Nostr.PubKeyId); end
+function ext_invalidate_cached_content_moderation(est::DB.CacheStorage, user_pubkey::Union{Nothing,Nostr.PubKeyId}); end
 
 end
