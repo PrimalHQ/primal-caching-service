@@ -645,8 +645,8 @@ function get_directmsg_contacts(
 
     d = Dict()
     evts = []
-    mds = []
-    mdextra = []
+    mds = OrderedSet()
+    mdextra = OrderedSet()
     for (peer, cnt, latest_at, latest_event_id) in 
         vcat(DB.exe(est.pubkey_directmsgs_cnt,
                     DB.@sql("select sender, cnt, latest_at, latest_event_id
@@ -679,15 +679,20 @@ function get_directmsg_contacts(
         if d[k][:cnt] < cnt
             d[k][:cnt] = cnt
         end
+        pks = [peer]
         if latest_event_id in est.events
-            push!(evts, est.events[latest_event_id])
+            e = est.events[latest_event_id]
+            push!(evts, e)
+            push!(pks, e.pubkey)
         end
-        if peer in est.meta_data
-            mdeid = est.meta_data[peer]
-            if mdeid in est.events
-                md = est.events[mdeid]
-                push!(mds, md)
-                union!(mdextra, ext_event_response(est, md))
+        for pk in pks
+            if pk in est.meta_data
+                mdeid = est.meta_data[pk]
+                if mdeid in est.events
+                    md = est.events[mdeid]
+                    push!(mds, md)
+                    union!(mdextra, ext_event_response(est, md))
+                end
             end
         end
     end
