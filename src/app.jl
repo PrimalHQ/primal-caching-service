@@ -64,6 +64,7 @@ function catch_exception(body::Function, args...; rethrow_exception=false)
         push!(exceptions, (time(), ex, args...))
         PRINT_EXCEPTIONS[] && Utils.print_exceptions()
         rethrow_exception && rethrow()
+        nothing
     end
 end
 
@@ -130,9 +131,9 @@ end
 
 THash = Vector{UInt8}
 parsed_mutelists = Dict{Nostr.PubKeyId, Tuple{Nostr.EventId, Any}}() |> ThreadSafe
-compiled_content_moderation_rules = Dict{Nostr.PubKeyId, Tuple{THash, Any}}() |> ThreadSafe
+compiled_content_moderation_rules = Dict{Union{Nostr.PubKeyId,Nothing}, Tuple{THash, Any}}() |> ThreadSafe
 
-function compile_content_moderation_rules(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)
+function compile_content_moderation_rules(est::DB.CacheStorage, pubkey)
     cmr = (; 
            pubkeys = Dict{Nostr.PubKeyId, NamedTuple{(:parent, :scopes), Tuple{Nostr.PubKeyId, Set{Symbol}}}}(),
            groups = Dict{Symbol, NamedTuple{(:scopes,), Tuple{Set{Symbol}}}}(),
@@ -140,60 +141,63 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey::Nostr.Pu
           )
     r = catch_exception(:compile_content_moderation_rules, (; pubkey)) do
         settings = ext_user_get_settings(est, pubkey)
-        (isnothing(pubkey) || isnothing(settings) || !settings.apply_content_moderation) && return cmr
+        (isnothing(settings) || !settings["applyContentModeration"]) && return cmr
 
         eids = Set{Nostr.EventId}()
 
-        push!(eids, settings.id)
+        push!(eids, settings["id"])
 
-        ml = (; 
-              pubkeys = Dict{Nostr.PubKeyId, Set{Symbol}}(),
-              groups = Dict{Symbol, Set{Symbol}}())
+        if !isnothing(pubkey)
+            ml = (; 
+                  pubkeys = Dict{Nostr.PubKeyId, Set{Symbol}}(),
+                  groups = Dict{Symbol, Set{Symbol}}())
 
-        if pubkey in est.mute_lists
-            local mlseid = est.mute_lists[pubkey]
-            push!(eids, mlseid)
+            if pubkey in est.mute_lists
+                local mlseid = est.mute_lists[pubkey]
+                push!(eids, mlseid)
 
-            pml = get(parsed_mutelists, pubkey, nothing)
-            if isnothing(pml) || pml[1] != mlseid
-                for tag in est.events[mlseid].tags
-                    if length(tag.fields) >= 2
-                        if tag.fields[1] == "p"
-                            scopes = if length(tag.fields) >= 5
-                                Set([Symbol(s) for s in JSON.parse(tag.fields[5])])
-                            else
-                                Set{Symbol}([:content, :trending])
+                pml = get(parsed_mutelists, pubkey, nothing)
+                if isnothing(pml) || pml[1] != mlseid
+                    for tag in est.events[mlseid].tags
+                        if length(tag.fields) >= 2
+                            if tag.fields[1] == "p"
+                                scopes = if length(tag.fields) >= 5
+                                    Set([Symbol(s) for s in JSON.parse(tag.fields[5])])
+                                else
+                                    Set{Symbol}([:content, :trending])
+                                end
+                                if !isempty(scopes)
+                                    ml.pubkeys[Nostr.PubKeyId(tag.fields[2])] = scopes
+                                end
+                                # elseif tag.fields[1] == "group"
+                                #     ml.groups[Symbol(tag.fields[2])] = if length(tag.fields) >= 3
+                                #         Set([Symbol(s) for s in JSON.parse(tag.fields[3])])
+                                #     else
+                                #         Set{Symbol}()
+                                #     end
                             end
-                            if !isempty(scopes)
-                                ml.pubkeys[Nostr.PubKeyId(tag.fields[2])] = scopes
-                            end
-                            # elseif tag.fields[1] == "group"
-                            #     ml.groups[Symbol(tag.fields[2])] = if length(tag.fields) >= 3
-                            #         Set([Symbol(s) for s in JSON.parse(tag.fields[3])])
-                            #     else
-                            #         Set{Symbol}()
-                            #     end
                         end
                     end
+                    parsed_mutelists[pubkey] = (mlseid, ml)
+                else
+                    ml = pml[2]
                 end
-                parsed_mutelists[pubkey] = (mlseid, ml)
-            else
-                ml = pml[2]
+            end
+
+            pks = Set{Nostr.PubKeyId}()
+
+            push!(eids, settings["id"])
+
+            pubkey in est.mute_lists && push!(eids, est.mute_lists[pubkey])
+            pubkey in est.allow_list && push!(eids, est.allow_list[pubkey])
+
+            for pk in [pubkey; collect(keys(ml.pubkeys))]
+                for tbl in [est.mute_list, est.mute_list_2, est.allow_list]
+                    pk in tbl && push!(eids, tbl[pk])
+                end
             end
         end
 
-        pks = Set{Nostr.PubKeyId}()
-
-        push!(eids, settings.id)
-
-        pubkey in est.mute_lists && push!(eids, est.mute_lists[pubkey])
-        pubkey in est.allow_list && push!(eids, est.allow_list[pubkey])
-
-        for pk in [pubkey; collect(keys(ml.pubkeys))]
-            for tbl in [est.mute_list, est.mute_list_2, est.allow_list]
-                pk in tbl && push!(eids, tbl[pk])
-            end
-        end
         eids = sort(collect(eids))
 
         h = SHA.sha256(vcat([0x00], [eid.hash for eid in eids]...))
@@ -202,7 +206,7 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey::Nostr.Pu
         !isnothing(cmr_) && cmr_[1] == h && return cmr_[2]
 
         catch_exception(:compile_content_moderation_rules_calc, (; pubkey)) do
-            for ppk in [pubkey, collect(keys(ml.pubkeys))...]
+            !isnothing(pubkey) && for ppk in [pubkey, collect(keys(ml.pubkeys))...]
                 for tbl in [est.mute_list, est.mute_list_2]
                     if ppk in tbl
                         for tag in est.events[tbl[ppk]].tags
@@ -217,14 +221,14 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey::Nostr.Pu
                 end
             end
 
-            for cm in settings.content_moderation
+            for cm in settings["contentModeration"]
                 scopes = Set([Symbol(s) for s in cm["scopes"]])
                 if !isempty(scopes)
                     cmr.groups[Symbol(cm["name"])] = (; scopes)
                 end
             end
 
-            if pubkey in est.allow_list
+            !isnothing(pubkey) && if pubkey in est.allow_list
                 for tag in est.events[est.allow_list[pubkey]].tags
                     if length(tag.fields) >= 2 && tag.fields[1] == "p"
                         if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
@@ -241,12 +245,12 @@ function compile_content_moderation_rules(est::DB.CacheStorage, pubkey::Nostr.Pu
 
         cmr
     end
-    isnothing(r) ? cmr : r
+    r isa NamedTuple ? r : cmr
 end
 
 function is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId)
-    isnothing(user_pubkey) && return false
     cmr = compile_content_moderation_rules(est, user_pubkey)
+    # cmr isa Bool && @show (user_pubkey, cmr)
     pubkey in cmr.pubkeys_allowed && return false
     if haskey(cmr.pubkeys, pubkey)
         scopes = cmr.pubkeys[pubkey].scopes
@@ -1022,7 +1026,7 @@ function ext_is_hidden(est::DB.CacheStorage, eid::Nostr.EventId); false; end
 function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId); false; end
 function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId); false; end
 function ext_event_response(est::DB.CacheStorage, e::Nostr.Event); []; end
-function ext_user_get_settings(est::DB.CacheStorage, pubkey::Nostr.PubKeyId); end
+function ext_user_get_settings(est::DB.CacheStorage, pubkey); end
 function ext_invalidate_cached_content_moderation(est::DB.CacheStorage, user_pubkey::Union{Nothing,Nostr.PubKeyId}); end
 
 end
