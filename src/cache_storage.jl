@@ -448,7 +448,7 @@ end
 function event_hook(est::CacheStorage, eid::Nostr.EventId, funcall::Tuple)
     if eid in est.events
         e = est.events[eid]
-        event_hook_execute(est, e, funcall)
+        event_hook_execute(est, e, Tuple(JSON.parse(JSON.json(funcall))))
     else
         exe(est.event_hooks, @sql("insert into kv (event_id, funcall) values (?1, ?2)"), eid, JSON.json(funcall))
     end
