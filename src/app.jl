@@ -755,39 +755,22 @@ function reset_directmsg_counts(est::DB.CacheStorage; event_from_user::Dict, rep
 end
 
 function get_directmsgs(
-        est::DB.CacheStorage;
-        receiver, sender,
+        est::DB.CacheStorage; 
+        receiver, sender, 
         since::Int=0, until::Int=trunc(Int, time()), limit::Int=20, offset::Int=0
     )
     receiver = cast(receiver, Nostr.PubKeyId)
     sender = cast(sender, Nostr.PubKeyId)
     msgs = []
-    res = []
-    res_meta_data = Dict()
     for (eid, created_at) in DB.exe(est.pubkey_directmsgs,
-                                    DB.@sql("select event_id, created_at from pubkey_directmsgs where
+                                    DB.@sql("select event_id, created_at from pubkey_directmsgs where 
                                             ((receiver is ?1 and sender is ?2) or (receiver is ?2 and sender is ?1)) and
-                                            created_at >= ?3 and created_at <= ?4
+                                            created_at >= ?3 and created_at <= ?4 
                                             order by created_at desc limit ?5 offset ?6"),
                                     receiver, sender, since, until, limit, offset)
-        e = est.events[Nostr.EventId(eid)]
-        pk = e.pubkey
-        if !haskey(res_meta_data, pk) && pk in est.meta_data
-            mdid = est.meta_data[pk]
-            if mdid in est.events
-                res_meta_data[pk] = est.events[mdid]
-            end
-        end
-        push!(res, e)
-        push!(msgs, (e, created_at))
+        push!(msgs, (est.events[Nostr.EventId(eid)], created_at))
     end
-
-    res_meta_data = collect(values(res_meta_data))
-    append!(res, res_meta_data)
-    append!(res, user_scores(est, res_meta_data))
-    ext_user_infos(est, res, res_meta_data)
-
-    vcat(res, range(msgs, :created_at))
+    vcat([e for (e, _) in msgs], range(msgs, :created_at))
 end
 
 function response_messages_for_list(est::DB.CacheStorage, tables, pubkey, extended_response=true)
