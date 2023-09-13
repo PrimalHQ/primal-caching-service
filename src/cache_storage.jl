@@ -1344,4 +1344,5 @@ function ext_pubkey_zap(est::CacheStorage, e, zapped_pk, amount_sats) end
 function ext_init(est::CacheStorage) end
 function ext_complete(est::CacheStorage) end
 function ext_is_hidden(est::CacheStorage, eid) false end
+function ext_is_human(est::CacheStorage, pubkey) true end
 
