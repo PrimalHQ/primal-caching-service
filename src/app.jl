@@ -601,8 +601,8 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
 
     push!(res, (;
                 kind=Int(USER_PROFILE),
-                pubkey,
                 content=JSON.json((;
+                                   pubkey,
                                    follows_count=length(follows(est, pubkey)),
                                    followers_count=get(est.pubkey_followers_cnt, pubkey, 0),
                                    note_count,
