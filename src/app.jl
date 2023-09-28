@@ -665,8 +665,6 @@ function get_directmsg_contacts(
 
         peer = Nostr.PubKeyId(peer)
 
-        is_hidden(est, user_pubkey, :content, peer) && continue
-
         if relation != :any
             if relation == :follows; peer in fs || continue
             elseif relation == :other; peer in fs && continue
