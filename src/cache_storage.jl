@@ -336,6 +336,7 @@ Base.@kwdef struct CacheStorage <: EventStorage
                                                               "create index if not exists kv_event_id on kv (event_id asc)",
                                                               "create index if not exists kv_ref_event_id on kv (ref_event_id asc)",
                                                               "create index if not exists kv_ref_created_at on kv (ref_created_at desc)",
+                                                              "create index if not exists kv_event_id_ref_pubkey on kv (event_id asc, ref_pubkey asc)",
                                                              ])
 
     deleted_events = ShardedSqliteDict{Nostr.EventId, Nostr.EventId}("$(commons.directory)/db/deleted_events"; commons.dbargs...,
@@ -973,11 +974,11 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                     e.id, e.created_at, try zap_sender(e) catch _ end, zapped_pk, amount_sats, parent_eid)
                 if !isnothing(parent_eid)
                     event_hook(est, parent_eid, (:event_stats_cb, :zaps, +1))
-                    ext_zap(est, e, parent_eid, amount_sats)
                     event_pubkey_action(est, parent_eid, 
                                         Nostr.Event(e.id, zap_sender(e), e.created_at, e.kind, 
                                                     e.tags, e.content, e.sig),
                                         :zapped)
+                    ext_zap(est, e, parent_eid, amount_sats)
                 end
                 if !isnothing(zapped_pk)
                     ext_pubkey_zap(est, e, zapped_pk, amount_sats)
