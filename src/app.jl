@@ -277,6 +277,7 @@ function response_messages_for_posts(
         ext_is_hidden(est, eid) && return
         eid in est.deleted_events && return
 
+        eid in est.events || return
         e = est.events[eid]
         is_hidden(est, user_pubkey, :content, e.pubkey) && return
         ext_is_hidden(est, e.pubkey) && return
@@ -757,14 +758,28 @@ function get_directmsgs(
     )
     receiver = cast(receiver, Nostr.PubKeyId)
     sender = cast(sender, Nostr.PubKeyId)
+
     msgs = []
+    res = []
     for (eid, created_at) in DB.exe(est.pubkey_directmsgs,
                                     DB.@sql("select event_id, created_at from pubkey_directmsgs where 
                                             ((receiver is ?1 and sender is ?2) or (receiver is ?2 and sender is ?1)) and
                                             created_at >= ?3 and created_at <= ?4 
                                             order by created_at desc limit ?5 offset ?6"),
                                     receiver, sender, since, until, limit, offset)
-        push!(msgs, (est.events[Nostr.EventId(eid)], created_at))
+        e = est.events[Nostr.EventId(eid)]
+        push!(res, e)
+        push!(msgs, (e, created_at))
+    end
+
+    res_meta_data = Dict()
+    for pk in [receiver, sender]
+        if !haskey(res_meta_data, pk) && pk in est.meta_data
+            mdid = est.meta_data[pk]
+            if mdid in est.events
+                res_meta_data[pk] = est.events[mdid]
+            end
+        end
     end
     vcat([e for (e, _) in msgs], range(msgs, :created_at))
 end
