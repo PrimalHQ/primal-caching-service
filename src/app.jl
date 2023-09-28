@@ -50,6 +50,7 @@ IS_USER_FOLLOWING=10_000_125
 EVENT_IMPORT_STATUS=10_000_127
 ZAP_EVENT=10_000_129
 FILTERING_REASON=10_000_131
+USER_FOLLOWER_COUNTS=10_000_133
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -360,6 +361,11 @@ function feed(
         #                                                       order by created_at desc limit ? offset ?"),
         #                                      (since, until, Int(include_replies), limit, offset))))
         # end
+    elseif notes == :replies
+        append!(posts, map(Tuple, DB.exe(est.pubkey_events, DB.@sql("select event_id, created_at from kv 
+                                                                    where pubkey = ? and created_at >= ? and created_at <= ? and is_reply = 1
+                                                                    order by created_at desc limit ? offset ?"),
+                                         pubkey, since, until, limit, offset)))
     else
         pubkeys = 
         if     notes == :follows;  follows(est, pubkey)
@@ -480,20 +486,7 @@ function contact_list(est::DB.CacheStorage; pubkey, extended_response=true)
         eid in est.events && push!(res, est.events[eid])
     end
 
-    if extended_response
-        res_meta_data = Dict() |> ThreadSafe
-        @threads for pk in follows(est, pubkey) 
-            if pk in est.meta_data
-                eid = est.meta_data[pk]
-                eid in est.events && (res_meta_data[pk] = est.events[eid])
-            end
-        end
-
-        res_meta_data = collect(values(res_meta_data))
-        append!(res, res_meta_data)
-        append!(res, user_scores(est, res_meta_data))
-        ext_user_infos(est, res, res_meta_data)
-    end
+    extended_response && append!(res, user_infos(est; pubkeys=follows(est, pubkey)))
 
     res
 end
@@ -520,7 +513,10 @@ function user_infos(est::DB.CacheStorage; pubkeys::Vector)
     for pk in pubkeys
         haskey(res_meta_data, pk) && push!(res_meta_data_arr, res_meta_data[pk])
     end
-    res = [res_meta_data_arr..., user_scores(est, res_meta_data_arr)...]
+    res = [res_meta_data_arr..., user_scores(est, res_meta_data_arr)..., 
+           (; kind=Int(USER_FOLLOWER_COUNTS),
+            content=JSON.json(Dict([Nostr.hex(pk)=>get(est.pubkey_followers_cnt, pk, 0) for pk in pubkeys]))
+           )]
     ext_user_infos(est, res, res_meta_data_arr)
     res
 end
@@ -546,6 +542,7 @@ function user_followers(est::DB.CacheStorage; pubkey, limit=200)
         pk = Nostr.PubKeyId(r[1])
         pk in pks || push!(pks, pk)
     end
+
     user_infos(est; pubkeys=collect(pks))
 end
 
