@@ -1035,18 +1035,22 @@ function import_directmsg(est::CacheStorage, e::Nostr.Event)
     for tag in e.tags
         if length(tag.fields) >= 2 && tag.fields[1] == "p"
             if !isnothing(local receiver = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-                lock(est.pubkey_directmsgs_cnt_lock) do
-                    isempty(exe(est.pubkey_directmsgs, @sql("select 1 from pubkey_directmsgs indexed by pubkey_directmsgs_receiver_event_id where receiver = ?1 and event_id = ?2 limit 1"), receiver, e.id)) &&
+                hidden = ext_is_hidden(est, e.pubkey) || try Base.invokelatest(Main.App.is_hidden, est, receiver, :content, e.pubkey) catch _ false end
+                # @show (receiver, e.pubkey, hidden)
+                if !hidden
+                    lock(est.pubkey_directmsgs_cnt_lock) do
+                        isempty(exe(est.pubkey_directmsgs, @sql("select 1 from pubkey_directmsgs indexed by pubkey_directmsgs_receiver_event_id where receiver = ?1 and event_id = ?2 limit 1"), receiver, e.id)) &&
                         exe(est.pubkey_directmsgs, @sql("insert into pubkey_directmsgs values (?1, ?2, ?3, ?4)"), receiver, e.pubkey, e.created_at, e.id)
 
-                    for sender in [nothing, e.pubkey]
-                        if isempty(exe(est.pubkey_directmsgs_cnt, @sql("select 1 from pubkey_directmsgs_cnt indexed by pubkey_directmsgs_cnt_receiver_sender where receiver is ?1 and sender is ?2 limit 1"), receiver, sender))
-                            exe(est.pubkey_directmsgs_cnt, @sql("insert into pubkey_directmsgs_cnt values (?1, ?2, ?3, ?4, ?5)"), receiver, sender, 0, e.created_at, e.id)
-                        end
-                        exe(est.pubkey_directmsgs_cnt, @sql("update pubkey_directmsgs_cnt indexed by pubkey_directmsgs_cnt_receiver_sender set cnt = cnt + ?3 where receiver is ?1 and sender is ?2"), receiver, sender, +1)
-                        prev_latest_at = exe(est.pubkey_directmsgs_cnt, @sql("select latest_at from pubkey_directmsgs_cnt indexed by pubkey_directmsgs_cnt_receiver_sender where receiver is ?1 and sender is ?2 limit 1"), receiver, sender)[1][1]
-                        if e.created_at >= prev_latest_at
-                            exe(est.pubkey_directmsgs_cnt, @sql("update pubkey_directmsgs_cnt indexed by pubkey_directmsgs_cnt_receiver_sender set latest_at = ?3, latest_event_id = ?4 where receiver is ?1 and sender is ?2"), receiver, sender, e.created_at, e.id)
+                        for sender in [nothing, e.pubkey]
+                            if isempty(exe(est.pubkey_directmsgs_cnt, @sql("select 1 from pubkey_directmsgs_cnt indexed by pubkey_directmsgs_cnt_receiver_sender where receiver is ?1 and sender is ?2 limit 1"), receiver, sender))
+                                exe(est.pubkey_directmsgs_cnt, @sql("insert into pubkey_directmsgs_cnt values (?1, ?2, ?3, ?4, ?5)"), receiver, sender, 0, e.created_at, e.id)
+                            end
+                            exe(est.pubkey_directmsgs_cnt, @sql("update pubkey_directmsgs_cnt indexed by pubkey_directmsgs_cnt_receiver_sender set cnt = cnt + ?3 where receiver is ?1 and sender is ?2"), receiver, sender, +1)
+                            prev_latest_at = exe(est.pubkey_directmsgs_cnt, @sql("select latest_at from pubkey_directmsgs_cnt indexed by pubkey_directmsgs_cnt_receiver_sender where receiver is ?1 and sender is ?2 limit 1"), receiver, sender)[1][1]
+                            if e.created_at >= prev_latest_at
+                                exe(est.pubkey_directmsgs_cnt, @sql("update pubkey_directmsgs_cnt indexed by pubkey_directmsgs_cnt_receiver_sender set latest_at = ?3, latest_event_id = ?4 where receiver is ?1 and sender is ?2"), receiver, sender, e.created_at, e.id)
+                            end
                         end
                     end
                 end
