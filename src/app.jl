@@ -17,7 +17,7 @@ exposed_functions = Set([:feed,
                          :user_followers,
                          :events,
                          :event_actions,
-                         :user_profile
+                         :user_profile,
                          :get_directmsg_contacts,
                          :reset_directmsg_count,
                          :reset_directmsg_counts,
