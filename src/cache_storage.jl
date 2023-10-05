@@ -399,6 +399,7 @@ Base.@kwdef struct CacheStorage <: EventStorage
                                                  "create index if not exists zap_receipts_sender on zap_receipts (sender asc)",
                                                  "create index if not exists zap_receipts_receiver on zap_receipts (receiver asc)",
                                                  "create index if not exists zap_receipts_created_at on zap_receipts (created_at asc)",
+                                                 "create index if not exists zap_receipts_amount_sats on zap_receipts (amount_sats desc)",
                                                  "create index if not exists zap_receipts_event_id on zap_receipts (event_id asc)",
                                                 ])
 
@@ -501,6 +502,15 @@ function zap_sender(zap_receipt::Nostr.Event)
     for tag in zap_receipt.tags
         if length(tag.fields) >= 2 && tag.fields[1] == "description"
             return Nostr.PubKeyId(JSON.parse(tag.fields[2])["pubkey"])
+        end
+    end
+    error("invalid zap receipt event")
+end
+
+function zap_receiver(zap_receipt::Nostr.Event)
+    for tag in zap_receipt.tags
+        if length(tag.fields) >= 2 && tag.fields[1] == "p"
+            return Nostr.PubKeyId(tag.fields[2])
         end
     end
     error("invalid zap receipt event")
@@ -951,6 +961,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
             amount_sats = 0
             parent_eid = nothing
             zapped_pk = nothing
+            description = nothing
             for tag in e.tags
                 if length(tag.fields) >= 2
                     if tag.fields[1] == "e"
@@ -964,14 +975,14 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                                 amount_sats = amount
                             end
                         end
+                    elseif tag.fields[1] == "description"
+                        description = try JSON.parse(tag.fields[2]) catch _ nothing end
                     end
                 end
             end
-            if amount_sats > 0
+            if amount_sats > 0 && !isnothing(description)
                 incr(est, :zaps)
                 incr(est, :satszapped; by=amount_sats)
-                exe(est.zap_receipts, @sql("insert into zap_receipts (zap_receipt_id, created_at, sender, receiver, amount_sats, event_id) values (?1, ?2, ?3, ?4, ?5, ?6)"),
-                    e.id, e.created_at, try zap_sender(e) catch _ end, zapped_pk, amount_sats, parent_eid)
                 if !isnothing(parent_eid)
                     event_hook(est, parent_eid, (:event_stats_cb, :zaps, +1))
                     event_pubkey_action(est, parent_eid, 

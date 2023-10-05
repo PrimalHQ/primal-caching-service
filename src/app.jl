@@ -17,7 +17,7 @@ exposed_functions = Set([:feed,
                          :user_followers,
                          :events,
                          :event_actions,
-                         :user_profile,
+                         :user_profile
                          :get_directmsg_contacts,
                          :reset_directmsg_count,
                          :reset_directmsg_counts,
@@ -30,6 +30,7 @@ exposed_functions = Set([:feed,
                          :import_events,
                          :zaps_feed,
                          :user_zaps,
+                         :user_zaps_by_satszapped,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -597,6 +598,14 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
 
     time_joined = isempty(time_joined_r) ? nothing : time_joined_r[1][1];
 
+    relay_count = 0
+    if pubkey in est.contact_lists
+        clid = est.contact_lists[pubkey]
+        if clid in est.events
+            try relay_count = length(keys(JSON.parse(est.events[clid].content))) catch _ end
+        end
+    end
+
     push!(res, (;
                 kind=Int(USER_PROFILE),
                 content=JSON.json((;
@@ -606,6 +615,8 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
                                    note_count,
                                    reply_count,
                                    time_joined,
+                                   relay_count,
+                                   ext_user_profile(est, pubkey)...,
                                   ))))
 
     !isnothing(user_pubkey) && is_hidden(est, user_pubkey, :content, pubkey) && append!(res, search_filterlist(est; pubkey, user_pubkey))
@@ -907,7 +918,7 @@ function import_events(est::DB.CacheStorage; events::Vector=[])
     [(; kind=Int(EVENT_IMPORT_STATUS), content=JSON.json((; imported=cnt[], errors=errcnt[])))]
 end
 
-function response_messages_for_zaps(est, zaps; kinds=nothing)
+function response_messages_for_zaps(est, zaps; kinds=nothing, order_by=:created_at)
     res_meta_data = Dict()
     res = []
     for (zap_receipt_id, created_at, event_id, sender, receiver, amount_sats) in zaps
@@ -939,7 +950,11 @@ function response_messages_for_zaps(est, zaps; kinds=nothing)
     ext_user_infos(est, res, res_meta_data)
 
     res_ = []
-    for e in [collect(OrderedSet(res)); range(zaps, :created_at)]
+    by = if order_by == :created_at; r->r[2]
+    elseif order_by == :amount_sats; r->r[6]
+    else; error("invalid order_by")
+    end
+    for e in [collect(OrderedSet(res)); range(zaps, order_by; by)]
         if isnothing(kinds) || (hasproperty(e, :kind) && getproperty(e, :kind) in kinds)
             push!(res_, e)
         end
@@ -1005,6 +1020,25 @@ function user_zaps(
     response_messages_for_zaps(est, zaps; kinds)
 end
 
+function user_zaps_by_satszapped(
+        est::DB.CacheStorage;
+        receiver=nothing,
+        limit::Int=20, since::Int=0, until=nothing, offset::Int=0,
+    )
+    limit <= 1000 || error("limit too big")
+    receiver = cast(receiver, Nostr.PubKeyId)
+
+    isnothing(until) && (until = 1<<61)
+    zaps = map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
+                                                        where receiver = ? and amount_sats >= ? and amount_sats <= ?
+                                                        order by amount_sats desc limit ? offset ?"),
+                              (receiver, since, until, limit, offset)))
+
+    zaps = sort(zaps, by=z->-z[6])[1:min(limit, length(zaps))]
+
+    response_messages_for_zaps(est, zaps; order_by=:amount_sats)
+end
+
 REPLICATE_TO_SERVERS = []
 
 function replicate_request(reqname::Union{String, Symbol}; kwargs...)
@@ -1018,6 +1052,7 @@ function replicate_request(reqname::Union{String, Symbol}; kwargs...)
 end
 
 function ext_user_infos(est::DB.CacheStorage, res, res_meta_data) end
+function ext_user_profile(est::DB.CacheStorage, pubkey); (;); end
 function ext_is_hidden(est::DB.CacheStorage, eid::Nostr.EventId); false; end
 function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId); false; end
 function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId); false; end
