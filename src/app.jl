@@ -3,6 +3,7 @@ module App
 import JSON
 using .Threads: @threads
 using DataStructures: OrderedSet, CircularBuffer
+import Sockets
 
 import ..DB
 import ..Nostr
@@ -31,6 +32,7 @@ exposed_functions = Set([:feed,
                          :zaps_feed,
                          :user_zaps,
                          :user_zaps_by_satszapped,
+                         :server_name,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -1039,6 +1041,10 @@ function user_zaps_by_satszapped(
     zaps = sort(zaps, by=z->-z[6])[1:min(limit, length(zaps))]
 
     response_messages_for_zaps(est, zaps; order_by=:amount_sats)
+end
+
+function server_name(est::DB.CacheStorage)
+    [(; content=JSON.json(Int(Sockets.getipaddr().host >> 8 & 0xff)-10))]
 end
 
 REPLICATE_TO_SERVERS = []
