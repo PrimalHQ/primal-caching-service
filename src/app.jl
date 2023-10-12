@@ -16,6 +16,7 @@ exposed_functions = Set([:feed,
                          :is_user_following,
                          :user_infos,
                          :user_followers,
+                         :mutual_follows,
                          :events,
                          :event_actions,
                          :user_profile,
@@ -546,6 +547,21 @@ function user_followers(est::DB.CacheStorage; pubkey, limit=200)
         pk in pks || push!(pks, pk)
     end
 
+    user_infos(est; pubkeys=collect(pks))
+end
+
+function mutual_follows(est::DB.CacheStorage; pubkey, user_pubkey)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
+    pks = Set{Nostr.PubKeyId}()
+    for pk in follows(est, user_pubkey)
+        if !isempty(DB.exe(est.pubkey_followers, 
+                           DB.@sql("select 1 from kv 
+                                   where pubkey = ?1 and follower_pubkey = ?2
+                                   limit 1"), pubkey, pk))
+            push!(pks, pk)
+        end
+    end
     user_infos(est; pubkeys=collect(pks))
 end
 
