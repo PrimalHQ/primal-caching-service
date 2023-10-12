@@ -167,7 +167,7 @@ function update_fetchers!(relay_urls; wait_to_stop=false, since=0)
         if !haskey(fetchers, relay_url)
             latest_timestamp_fn = relay_root_dir(relay_url) * "/latest_timestamp"
             if isfile(latest_timestamp_fn)
-                since = parse(Int, load(latest_timestamp_fn))
+                try since = parse(Int, load(latest_timestamp_fn)) catch _ end
             end
 
             proxy = PROXY_URI[]
