@@ -337,6 +337,7 @@ Base.@kwdef struct CacheStorage <: EventStorage
                                                               "create index if not exists kv_ref_event_id on kv (ref_event_id asc)",
                                                               "create index if not exists kv_ref_created_at on kv (ref_created_at desc)",
                                                               "create index if not exists kv_event_id_ref_pubkey on kv (event_id asc, ref_pubkey asc)",
+                                                              "create index if not exists kv_event_id_ref_kind on kv (event_id asc, ref_kind asc)",
                                                              ])
 
     deleted_events = ShardedSqliteDict{Nostr.EventId, Nostr.EventId}("$(commons.directory)/db/deleted_events"; commons.dbargs...,
