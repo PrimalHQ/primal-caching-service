@@ -120,18 +120,22 @@ function event_actions_cnt(est::DB.CacheStorage, eid::Nostr.EventId, user_pubkey
     end
 end
 
-function event_actions(est::DB.CacheStorage; event_id, user_pubkey, kind::Int, limit=100)
+function event_actions(est::DB.CacheStorage; event_id, kind::Int, limit=100)
     limit <= 1000 || error("limit too big")
     event_id = cast(event_id, Nostr.EventId)
-    user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
-    pks = [Nostr.PubKeyId(pk) 
-           for (pk,) in DB.exe(est.event_pubkey_action_refs,
-                               DB.@sql("select ref_pubkey from kv 
-                                        where event_id = ?1 and ref_kind = ?2 
-                                        order by ref_created_at desc
-                                        limit ?3"),
-                               event_id, kind, limit)]
-    user_infos(est; pubkeys=pks)
+    res = []
+    pks = Set{Nostr.PubKeyId}()
+    for (reid, pk) in DB.exe(est.event_pubkey_action_refs,
+                             DB.@sql("select ref_event_id, ref_pubkey from kv 
+                                     where event_id = ?1 and ref_kind = ?2 
+                                     order by ref_created_at desc
+                                     limit ?3"),
+                             event_id, kind, limit)
+        push!(pks, Nostr.PubKeyId(pk))
+        reid = Nostr.EventId(reid)
+        reid in est.events && push!(res, est.events[reid])
+    end
+    [res; user_infos(est; pubkeys=collect(pks))]
 end
 
 THash = Vector{UInt8}
