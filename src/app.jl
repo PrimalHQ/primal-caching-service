@@ -38,6 +38,7 @@ exposed_functions = Set([:feed,
 
 exposed_async_functions = Set([:net_stats, 
                                :directmsg_count,
+                               :directmsg_count_2,
                               ])
 
 EVENT_STATS=10_000_100
@@ -55,6 +56,7 @@ EVENT_IMPORT_STATUS=10_000_127
 ZAP_EVENT=10_000_129
 FILTERING_REASON=10_000_131
 USER_FOLLOWER_COUNTS=10_000_133
+DIRECTMSG_COUNT_2=10_000_134
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -667,6 +669,11 @@ function get_directmsg_count(est::DB.CacheStorage; receiver, sender=nothing)
         break
     end
     [(; kind=Int(DIRECTMSG_COUNT), cnt)]
+end
+
+function get_directmsg_count_2(est::DB.CacheStorage; receiver, sender=nothing)
+    cnt = get_directmsg_count(est; receiver, sender)[1].cnt
+    [(; kind=Int(DIRECTMSG_COUNT_2), content=JSON.json(cnt))]
 end
 
 function get_directmsg_contacts(

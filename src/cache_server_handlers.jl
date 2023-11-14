@@ -241,12 +241,20 @@ function broadcast_directmsg_count()
     with_broadcast(:broadcast_directmsg_count) do conn, subid, filt
         if haskey(filt, "cache")
             filt = filt["cache"]
-            if length(filt) >= 2 && filt[1] == "directmsg_count"
-                pubkey = Nostr.PubKeyId(filt[2]["pubkey"])
-                for d in Base.invokelatest(App().get_directmsg_count, est(); receiver=pubkey)
-                    @async send(conn, JSON.json(["EVENT", subid, d]))
+            if length(filt) >= 2 
+                if filt[1] == "directmsg_count"
+                    pubkey = Nostr.PubKeyId(filt[2]["pubkey"])
+                    for d in Base.invokelatest(App().get_directmsg_count, est(); receiver=pubkey)
+                        @async send(conn, JSON.json(["EVENT", subid, d]))
+                    end
+                    return true
+                elseif filt[1] == "directmsg_count_2"
+                    pubkey = Nostr.PubKeyId(filt[2]["pubkey"])
+                    for d in Base.invokelatest(App().get_directmsg_count_2, est(); receiver=pubkey)
+                        @async send(conn, JSON.json(["EVENT", subid, d]))
+                    end
+                    return true
                 end
-                return true
             end
         end
     end
