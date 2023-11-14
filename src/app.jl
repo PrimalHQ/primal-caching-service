@@ -4,6 +4,7 @@ import JSON
 using .Threads: @threads
 using DataStructures: OrderedSet, CircularBuffer
 import Sockets
+import Dates
 
 import ..DB
 import ..Nostr
@@ -64,11 +65,11 @@ castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(v
 PRINT_EXCEPTIONS = Ref(false)
 exceptions = CircularBuffer(200)
 
-function catch_exception(body::Function, args...; rethrow_exception=false)
+function catch_exception(body::Function, args...; rethrow_exception=false, kwargs...)
     try
         body()
     catch ex
-        push!(exceptions, (time(), ex, args...))
+        push!(exceptions, (; t=Dates.now(), ex, args, kwargs...))
         PRINT_EXCEPTIONS[] && Utils.print_exceptions()
         rethrow_exception && rethrow()
         nothing
