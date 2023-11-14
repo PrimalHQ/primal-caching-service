@@ -825,7 +825,7 @@ function get_directmsgs(
     append!(res, res_meta_data)
     ext_user_infos(est, res, res_meta_data)
 
-    [res..., range(msgs, :created_at)]
+    [res..., range(msgs, :created_at)...]
 end
 
 function response_messages_for_list(est::DB.CacheStorage, tables, pubkey, extended_response=true)
