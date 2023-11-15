@@ -189,6 +189,8 @@ Base.@kwdef struct DeduplicatedEventStorage <: EventStorage
     deduped_events = ShardedSqliteSet(Nostr.EventId, "$(commons.directory)/deduped_events"; commons.dbargs...,
                                       init_queries=["create table if not exists kv (
                                                        event_id blob not null,
+                                                       pubkey blob not null,
+                                                       kind int not null,
                                                        created_at int not null,
                                                        processed_at int not null,
                                                        file_position int not null,
@@ -639,11 +641,13 @@ function import_msg_into_storage(msg::String, est::DeduplicatedEventStorage; for
     end
 
     exe(est.deduped_events,
-        @sql("insert into kv (event_id, created_at, processed_at, file_position, times_seen) values (?1, ?2, ?3, ?4, ?5)"), 
-        e.id, e.created_at, trunc(Int, time()), position(fout.io), 1)
+        @sql("insert into kv (event_id, pubkey, kind, created_at, processed_at, file_position, times_seen) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)"), 
+        e.id, e.pubkey, e.kind, e.created_at, trunc(Int, time()), position(fout.io), 1)
 
-    println(fout.io, msg)
-    flush(fout.io)
+    lock(est.files) do _ #!!
+        println(fout.io, msg)
+        flush(fout.io)
+    end
     fout.t_last_write[] = time()
 
     est.close_files_periodically() do
