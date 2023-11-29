@@ -95,9 +95,14 @@ function app_funcall(funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol,
                           (; funcall, kwargs, ws=string(ws_id), subid)
                       end) do
     fetch(Threads.@spawn with_time_limit() do time_exceeded
-              funcall in [:feed] && push!(kwargs, :time_exceeded=>time_exceeded)
-              vcat(Base.invokelatest(getproperty(App(), funcall), est(); kwargs..., kwargs_extra...),
-                   time_exceeded() ? [(; kind=App().PARTIAL_RESPONSE)] : [])
+              funcall in [:feed, :get_notifications] && push!(kwargs, :time_exceeded=>time_exceeded)
+              res = []
+              append!(res, Base.invokelatest(getproperty(App(), funcall), est(); kwargs..., kwargs_extra...))
+              if time_exceeded()
+                  # @show (:time_exceeded, Dates.now(), funcall)
+                  push(res, (; kind=App().PARTIAL_RESPONSE))
+              end
+              res
           end)
     end |> sendres
 end

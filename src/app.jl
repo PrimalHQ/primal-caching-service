@@ -279,6 +279,7 @@ end
 function response_messages_for_posts(
         est::DB.CacheStorage, eids::Vector{Nostr.EventId}; 
         res_meta_data=Dict(), user_pubkey=nothing,
+        time_exceeded=()->false,
     )
     res = OrderedSet() |> ThreadSafe
 
@@ -322,6 +323,8 @@ function response_messages_for_posts(
     for eid in eids
         handle_event(eid) do subeid
             handle_event(subeid; wrapfun=e->(; kind=Int(REFERENCED_EVENT), content=JSON.json(e))) do subeid
+                yield()
+                time_exceeded() && return
                 handle_event(subeid; wrapfun=e->(; kind=Int(REFERENCED_EVENT), content=JSON.json(e))) do _
                 end
             end
@@ -395,7 +398,7 @@ function feed(
     posts = sort(posts.wrapped, by=p->-p[2])[1:min(limit, length(posts))]
 
     eids = [Nostr.EventId(eid) for (eid, _) in posts]
-    res = response_messages_for_posts(est, eids; user_pubkey)
+    res = response_messages_for_posts(est, eids; user_pubkey, time_exceeded)
 
     vcat(res, range(posts, :created_at))
 end
