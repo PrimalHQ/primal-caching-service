@@ -309,4 +309,20 @@ function extension(obj, name::Symbol, args...; kwargs...)
     end
 end
 
+struct Dyn; _data::Dict; end
+Dyn(; kwargs...) = Dyn(Dict(kwargs))
+Dyn(nt::NamedTuple) = Dyn(Dict(pairs(nt)))
+Dyn() = Dyn(Dict())
+Base.getproperty(dyn::Dyn, prop::Symbol) = prop == :_data ? getfield(dyn, :_data) : dyn._data[prop]
+Base.setproperty!(dyn::Dyn, prop::Symbol, v) = (dyn._data[prop] = v)
+Base.hasproperty(dyn::Dyn, prop::Symbol, v) = haskey(dyn._data, prop)
+Base.haskey(dyn::Dyn, k) = haskey(dyn._data, k)
+Base.getindex(dyn::Dyn, k) = dyn._data[k]
+Base.setindex!(dyn::Dyn, v, k) = (dyn._data[k] = v)
+Base.propertynames(dyn::Dyn) = collect(keys(dyn._data))
+Base.iterate(dyn::Dyn) = iterate(dyn._data)
+Base.iterate(dyn::Dyn, i::Int) = iterate(dyn._data, i)
+Base.merge!(dyn::Dyn, v) = merge!(dyn._data, v)
+Base.merge!(dyn::Dyn, v::NamedTuple) = merge!(dyn._data, pairs(v))
+
 end
