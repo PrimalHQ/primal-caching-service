@@ -151,6 +151,26 @@ function initial_filter_handler(conn::Conn, subid, filters)
                 end
                 app_funcall(:events, [:event_ids=>eids], sendres; subid, ws_id=ws_id)
 
+            elseif haskey(filt, "search")
+                kinds = get(filt, "kinds", [1])
+                if kinds == [0] && !haskey(filt, "since") && !haskey(filt, "until")
+                    kwargs = [
+                        :query=>filt["search"],
+                        :limit=>get(filt, "limit", 10)
+                    ]
+                    app_funcall(:user_search, kwargs, sendres; subid, ws_id=ws_id)
+                elseif kinds == [1]
+                    kwargs = [
+                        :query=>filt["search"],
+                        :limit=>get(filt, "limit", 20),
+                        :since=>get(filt, "since", 0),
+                        :until=>get(filt, "until", nothing)
+                    ]
+                    app_funcall(:search, kwargs, sendres; subid, ws_id=ws_id)
+                else
+                    send_error("unsupported search filter")
+                end
+
             elseif haskey(filt, "since") || haskey(filt, "until")
                 kwargs = []
                 for a in ["since", "until", "limit", "idsonly"]
