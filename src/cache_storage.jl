@@ -544,7 +544,7 @@ function parse_bolt11(b::String)
     end
 end
 
-MAX_SATSZAPPED = Ref(1_000_000)
+MAX_SATSZAPPED = Ref(100_000)
 
 re_hashref = r"\#\[([0-9]*)\]"
 re_mention = r"\bnostr:((note|npub|naddr|nevent|nprofile)1\w+)\b"
