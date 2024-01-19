@@ -371,6 +371,7 @@ Base.@kwdef struct CacheStorage <: EventStorage
                                                        )",
                                                        "create index if not exists pubkey_directmsgs_receiver   on pubkey_directmsgs (receiver asc)",
                                                        "create index if not exists pubkey_directmsgs_sender     on pubkey_directmsgs (sender asc)",
+                                                       "create index if not exists pubkey_directmsgs_receiver_sender on pubkey_directmsgs (receiver asc, sender asc)",
                                                        "create index if not exists pubkey_directmsgs_receiver_event_id on pubkey_directmsgs (receiver asc, event_id asc)",
                                                        "create index if not exists pubkey_directmsgs_created_at on pubkey_directmsgs (created_at desc)"])
 
