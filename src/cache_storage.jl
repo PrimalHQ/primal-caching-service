@@ -1188,7 +1188,19 @@ function init(est::CacheStorage, running=Ref(true))
     init(est.commons, running)
 
     ext_init(est)
-
+##
+    est.dyn[:dyn] = DB.ShardedSqliteSet(Nostr.EventId, "$(est.commons.directory)/db/dyn"; est.commons.dbargs...,
+                                        table="dyn",
+                                        init_queries=["create table if not exists dyn (
+                                                      c1, c2, c3, c4, c5
+                                                      )",
+                                                      "create index if not exists dyn_c1 on dyn (c1 asc)",
+                                                      "create index if not exists dyn_c2 on dyn (c2 asc)",
+                                                      "create index if not exists dyn_c3 on dyn (c3 asc)",
+                                                      "create index if not exists dyn_c4 on dyn (c4 asc)",
+                                                      "create index if not exists dyn_c5 on dyn (c5 asc)",
+                                                     ])
+##
     est.periodic_task_running[] = true
     est.periodic_task[] = errormonitor(@async while est.periodic_task_running[]
                                            catch_exception(est, :periodic) do
@@ -1196,6 +1208,7 @@ function init(est::CacheStorage, running=Ref(true))
                                            end
                                            Utils.active_sleep(60.0, est.periodic_task_running)
                                        end)
+
 end
 
 function periodic(est::CacheStorage)
@@ -1358,6 +1371,45 @@ function mon(est::EventStorage)
         pc = c
         sleep(1)
     end
+end
+
+function dyn_exists(est, args...)
+    where = join((" and c$i = ?$i" for i in 1:length(args)))
+    !isempty(DB.exec(est.dyn[:dyn], "select 1 from dyn where true $where limit 1", args))
+end
+function dyn_select(est, args...; limit=nothing, columns=nothing)
+    where = join((" and c$i = ?$i" for i in 1:length(args)))
+    isnothing(limit) || (where *= " limit $limit")
+    columns = isnothing(columns) ? "*" : join(("c$i" for i in columns), ',')
+    DB.exec(est.dyn[:dyn], "select $columns from dyn where true $where", args)
+end
+function dyn_insert(est, args...)
+    cols = join(("c$i" for i in 1:length(args)), ',')
+    vals = join(("?$i" for i in 1:length(args)), ',')
+    DB.exec(est.dyn[:dyn], "insert into dyn ($cols) values ($vals)", args)
+end
+function dyn_delete(est, args...)
+    where = join((" and c$i = ?$i" for i in 1:length(args)))
+    DB.exec(est.dyn[:dyn], "delete from dyn where true $where", args)
+end
+function dyn_get(est, args...)
+    r = dyn_select(est, args...; limit=1, columns=[length(args)+1])
+    isempty(r) ? nothing : r[1][1]
+end
+function dyn_set(est, args...; limit=nothing)
+    where = join((" and c$i = ?$i" for i in 1:length(args)-1))
+    isnothing(limit) || (where *= " limit $limit")
+    DB.exec(est.dyn[:dyn], "update dyn set c$(length(args)) = ?$(length(args)) where true $where", args)
+end
+function dyn_inc(est, args...; by=+1)
+    cnt = dyn_get(est, args...)
+    if isnothing(cnt) 
+        dyn_insert(est, args..., 0)
+        cnt = 0
+    end
+    cnt += by
+    dyn_set(est, args..., cnt)
+    cnt
 end
 
 function ext_preimport_check(est::CacheStorage, e) true end
