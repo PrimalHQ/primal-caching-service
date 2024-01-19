@@ -133,7 +133,7 @@ function initial_filter_handler(conn::Conn, subid, filters)
                 local filt = filt["cache"]
                 funcall = Symbol(filt[1])
                 if funcall in App().exposed_functions
-                    kwargs = [Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
+                    kwargs = Pair{Symbol, Any}[Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
                     app_funcall(funcall, kwargs, sendres; subid, ws_id=ws_id)
                 elseif funcall in App().exposed_async_functions
                     sendres([])
