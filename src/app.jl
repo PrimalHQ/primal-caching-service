@@ -326,6 +326,8 @@ function response_messages_for_posts(
 
     for eid in eids
         handle_event(eid) do subeid
+            yield()
+            time_exceeded() && return
             handle_event(subeid; wrapfun=e->(; kind=Int(REFERENCED_EVENT), content=JSON.json(e))) do subeid
                 yield()
                 time_exceeded() && return
