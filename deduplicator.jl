@@ -18,7 +18,7 @@ end
 # DB.PRINT_EXCEPTIONS[] = true
 
 deduped_storage = DB.DeduplicatedEventStorage(directory=target_dir;
-                                              dbargs=(; ndbs=1, journal_mode="WAL"))
+                                              dbargs=(; ndbs=256, journal_mode="WAL"))
 
 DB.import_to_storage(deduped_storage, input_dirs;
                      running=Utils.PressEnterToStop())
