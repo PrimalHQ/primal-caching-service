@@ -66,10 +66,13 @@ function with_time_limit(body::Function)
     body(() -> (time() - tstart) >= MAX_TIME_PER_REQUEST[])
 end
 
+SEND_ABORT = Ref(false)
+
 function send(ws::WebSocket, s::String)
     WebSockets.send(ws, s)
 end
 function send(conn::Conn, s::String)
+    SEND_ABORT[] && return
     lock(conn.ws) do ws
         lock(sendcnt) do sendcnt; sendcnt[] += 1; end
         try
