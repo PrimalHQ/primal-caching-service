@@ -35,6 +35,8 @@ exposed_functions = Set([:feed,
                          :user_zaps,
                          :user_zaps_by_satszapped,
                          :server_name,
+                         :nostr_stats,
+                         :is_hidden_by_content_moderation,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -58,6 +60,8 @@ ZAP_EVENT=10_000_129
 FILTERING_REASON=10_000_131
 USER_FOLLOWER_COUNTS=10_000_133
 DIRECTMSG_COUNT_2=10_000_134
+NOSTR_STATS=10_000_136
+IS_HIDDEN_BY_CONTENT_MODERATION=10_000_137
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -1088,6 +1092,22 @@ function replicate_request(reqname::Union{String, Symbol}; kwargs...)
             # println("replicated: ", msg)
         end)
     end
+end
+
+function nostr_stats(est::DB.CacheStorage)
+    res = [r[1:4] for r in DB.dyn_select(est, :daily_stats, :active_humans)]
+    [(; kind=Int(NOSTR_STATS), content=JSON.json(res))]
+end
+
+function is_hidden_by_content_moderation(est::DB.CacheStorage; user_pubkey=nothing, scope=:content, pubkeys=[], event_ids=[])
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    scope = cast(scope, Symbol)
+    pubkeys = [cast(pk, Nostr.PubKeyId) for pk in pubkeys]
+    event_ids = [cast(eid, Nostr.EventId) for eid in event_ids]
+    res = (; 
+           pubkeys=Dict([Nostr.hex(pk)=>is_hidden(est, user_pubkey, scope, pk) for pk in pubkeys]),
+           event_ids=Dict([Nostr.hex(eid)=>is_hidden(est, user_pubkey, scope, eid) for eid in event_ids]))
+    [(; kind=Int(IS_HIDDEN_BY_CONTENT_MODERATION), content=JSON.json(res))]
 end
 
 function ext_user_infos(est::DB.CacheStorage, res, res_meta_data) end
