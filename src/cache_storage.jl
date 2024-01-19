@@ -822,6 +822,17 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
     incr(est, :tags; by=length(e.tags))
 
     catch_exception(est, msg) do
+        lock(est.commons.stats) do _
+            d = string(Dates.Date(Dates.now()))
+            if !dyn_exists(est, :daily_stats, :human_event, d, e.pubkey)
+                dyn_insert(est, :daily_stats, :human_event, d, e.pubkey)
+                dyn_inc(est, :daily_stats, :active_users, d)
+                ext_is_human(est, e.pubkey) && dyn_inc(est, :daily_stats, :active_humans, d)
+            end
+        end
+    end
+
+    catch_exception(est, msg) do
         if     e.kind == Int(Nostr.SET_METADATA)
             track_user_stats(est, e.pubkey) do
                 k = e.pubkey
