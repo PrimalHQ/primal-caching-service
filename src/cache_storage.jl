@@ -931,7 +931,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
             if isnothing(parent_eid)
                 for tag in e.tags
                     if length(tag.fields) >= 2
-                        if tag.fields[1] == "e"
+                        if tag.fields[1] == "e" && (length(tag.fields) >= 4 && !(tag.fields[4] in ["mention"]))
                             if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
                                 parent_eid = eid
                             end
