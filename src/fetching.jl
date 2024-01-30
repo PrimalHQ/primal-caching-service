@@ -17,6 +17,8 @@ TIMEOUT = Ref(30)
 BASE_DELAY = Ref(1)
 MAX_DELAY = Ref(300)
 
+HTTP.ConnectionPool.default_connection_limit[] = 10000
+
 Base.@kwdef mutable struct Fetcher <: Utils.Tasked
     active=true
     task=nothing
