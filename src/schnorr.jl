@@ -68,6 +68,24 @@ function generate_keypair()
     end
 end
 
+function pubkey_of_seckey(seckey::Vector{UInt8})
+    with_context() do ctx
+        keypair = zeros(UInt8, 96)
+        pubkey = zeros(UInt8, 64)
+        serialized_pubkey = zeros(UInt8, 32)
+
+        GC.@preserve pubkey serialized_pubkey begin
+            @assert (@ccall :libsecp256k1.secp256k1_keypair_create(ctx::Ptr{Cvoid}, pointer(keypair)::Ptr{UInt8}, pointer(seckey)::Ptr{UInt8})::Cint) != 0
+
+            @assert (@ccall :libsecp256k1.secp256k1_keypair_xonly_pub(ctx::Ptr{Cvoid}, pointer(pubkey)::Ptr{UInt8}, C_NULL::Ptr{Cvoid}, pointer(keypair)::Ptr{UInt8})::Cint) != 0
+
+            @assert (@ccall :libsecp256k1.secp256k1_xonly_pubkey_serialize(ctx::Ptr{Cvoid}, pointer(serialized_pubkey)::Ptr{UInt8}, pointer(pubkey)::Ptr{UInt8})::Cint) != 0
+
+            serialized_pubkey
+        end
+    end
+end
+
 function generate_signature(seckey::Vector{UInt8}, msg_hash::Vector{UInt8})
     @assert length(msg_hash) == 32
 
