@@ -444,7 +444,7 @@ function thread_view_replies(est::DB.CacheStorage;
     posts = sort(posts, by=p->-p[2])[1:min(limit, length(posts))]
     
     reids = [reid for (reid, _) in posts]
-    response_messages_for_posts(est, reids; user_pubkey)
+    [response_messages_for_posts(est, reids; user_pubkey); range(posts, :created_at)]
 end
 
 function thread_view_parents(est::DB.CacheStorage; event_id, user_pubkey=nothing)
