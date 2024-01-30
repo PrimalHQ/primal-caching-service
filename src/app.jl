@@ -37,6 +37,7 @@ exposed_functions = Set([:feed,
                          :server_name,
                          :nostr_stats,
                          :is_hidden_by_content_moderation,
+                         :user_of_ln_address,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -62,6 +63,7 @@ USER_FOLLOWER_COUNTS=10_000_133
 DIRECTMSG_COUNT_2=10_000_134
 NOSTR_STATS=10_000_136
 IS_HIDDEN_BY_CONTENT_MODERATION=10_000_137
+USER_PUBKEY=10_000_138
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -1110,6 +1112,16 @@ function is_hidden_by_content_moderation(est::DB.CacheStorage; user_pubkey=nothi
            pubkeys=Dict([Nostr.hex(pk)=>is_hidden(est, user_pubkey, scope, pk) for pk in pubkeys]),
            event_ids=Dict([Nostr.hex(eid)=>is_hidden(est, user_pubkey, scope, eid) for eid in event_ids]))
     [(; kind=Int(IS_HIDDEN_BY_CONTENT_MODERATION), content=JSON.json(res))]
+end
+
+function user_of_ln_address(est::DB.CacheStorage; ln_address::String)
+    if !isempty(local r = DB.exec(est.dyn[:pubkey_ln_address], 
+                                  DB.@sql("select pubkey from pubkey_ln_address where ln_address = ?1"), 
+                                  (ln_address,)))
+        [(; kind=Int(USER_PUBKEY), content=JSON.json((; pubkey=Nostr.PubKeyId(r[1][1]))))]
+    else
+        []
+    end
 end
 
 function ext_user_infos(est::DB.CacheStorage, res, res_meta_data) end

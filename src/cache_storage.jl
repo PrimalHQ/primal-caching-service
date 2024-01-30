@@ -840,6 +840,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                 if !haskey(est.meta_data, k) || (e.created_at > est.events[est.meta_data[k]].created_at)
                     est.meta_data[k] = e.id
                     ext_metadata_changed(est, e)
+                    update_pubkey_ln_address(est, e.pubkey)
                 end
             end
         elseif e.kind == Int(Nostr.CONTACT_LIST)
@@ -1213,6 +1214,13 @@ function init(est::CacheStorage, running=Ref(true))
                                                       "create index if not exists dyn_c5 on dyn (c5 asc)",
                                                      ])
 ##
+    est.dyn[:pubkey_ln_address] = DB.ShardedSqliteDict{Nostr.PubKeyId, String}("$(est.commons.directory)/db/pubkey_ln_address"; est.commons.dbargs...,
+                                                                               table="pubkey_ln_address",
+                                                                               keycolumn="pubkey",
+                                                                               valuecolumn="ln_address",
+                                                                               init_extra_indexes=["create index if not exists pubkey_ln_address_ln_address on pubkey_ln_address (ln_address asc)",
+                                                                                                  ])
+##
     est.periodic_task_running[] = true
     est.periodic_task[] = errormonitor(@async while est.periodic_task_running[]
                                            catch_exception(est, :periodic) do
@@ -1422,6 +1430,15 @@ function dyn_inc(est, args...; by=+1)
     cnt += by
     dyn_set(est, args..., cnt)
     cnt
+end
+
+function update_pubkey_ln_address(est::CacheStorage, pubkey::Nostr.PubKeyId)
+    pubkey in est.meta_data || return
+    eid = est.meta_data[pubkey]
+    eid in est.events || return
+    d = JSON.parse(est.events[eid].content)
+    lud16 = get(d, "lud16", nothing)
+    !isnothing(lud16) && (est.dyn[:pubkey_ln_address][pubkey] = lud16)
 end
 
 function ext_preimport_check(est::CacheStorage, e) true end
