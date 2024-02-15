@@ -38,6 +38,7 @@ exposed_functions = Set([:feed,
                          :nostr_stats,
                          :is_hidden_by_content_moderation,
                          :user_of_ln_address,
+                         :get_user_relays,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -64,6 +65,7 @@ DIRECTMSG_COUNT_2=10_000_134
 NOSTR_STATS=10_000_136
 IS_HIDDEN_BY_CONTENT_MODERATION=10_000_137
 USER_PUBKEY=10_000_138
+USER_RELAYS=10_000_139
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -637,13 +639,7 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
 
     time_joined = isempty(time_joined_r) ? nothing : time_joined_r[1][1];
 
-    relay_count = 0
-    if pubkey in est.contact_lists
-        clid = est.contact_lists[pubkey]
-        if clid in est.events
-            try relay_count = length(keys(JSON.parse(est.events[clid].content))) catch _ end
-        end
-    end
+    relay_count = length(Set([t[2] for t in get_user_relays(est; pubkey)[end].tags]))
 
     push!(res, (;
                 kind=Int(USER_PROFILE),
@@ -1121,10 +1117,44 @@ function user_of_ln_address(est::DB.CacheStorage; ln_address::String)
     if !isempty(local r = DB.exec(est.dyn[:pubkey_ln_address], 
                                   DB.@sql("select pubkey from pubkey_ln_address where ln_address = ?1"), 
                                   (ln_address,)))
-        [(; kind=Int(USER_PUBKEY), content=JSON.json((; pubkey=Nostr.PubKeyId(r[1][1]))))]
+        pubkey = Nostr.PubKeyId(r[1][1])
+        [(; kind=Int(USER_PUBKEY), content=JSON.json((; pubkey))), user_infos(est; pubkeys=[pubkey])...]
     else
         []
     end
+end
+
+function get_user_relays(est::DB.CacheStorage; pubkey)
+    pubkey = castmaybe(pubkey, Nostr.PubKeyId)
+    res = []
+    relays = Set()
+    if haskey(est.dyn[:relay_list_metadata], pubkey)
+        eid = est.dyn[:relay_list_metadata][pubkey]
+        if haskey(est.events, eid)
+            e = est.events[eid]
+            # push!(res, e)
+            for t in e.tags
+                if length(t.fields) >= 2 && t.fields[1] == "r"
+                    push!(relays, ["r", t.fields[2:end]...])
+                end
+            end
+        end
+    end
+    if isempty(relays) && haskey(est.contact_lists, pubkey)
+        eid = est.contact_lists[pubkey]
+        if haskey(est.events, eid)
+            e = est.events[eid]
+            # push!(res, e)
+            d = try JSON.parse(e.content) catch _ Dict() end
+            for (url, dd) in d
+                for (k, v) in dd
+                    v && push!(relays, ["r", url, k])
+                end
+            end
+        end
+    end
+    isempty(relays) || push!(res, (; kind=Int(USER_RELAYS), tags=sort(collect(relays))))
+    res
 end
 
 function ext_user_infos(est::DB.CacheStorage, res, res_meta_data) end

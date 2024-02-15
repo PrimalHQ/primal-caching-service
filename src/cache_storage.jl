@@ -1048,6 +1048,10 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
                     end
                 end
             end
+        elseif e.kind == Int(Nostr.RELAY_LIST_METADATA)
+            if !haskey(est.dyn[:relay_list_metadata], e.pubkey) || est.events[est.dyn[:relay_list_metadata][e.pubkey]].created_at < e.created_at
+                est.dyn[:relay_list_metadata][e.pubkey] = e.id
+            end
         end
     end
 
@@ -1220,6 +1224,11 @@ function init(est::CacheStorage, running=Ref(true))
                                                                                valuecolumn="ln_address",
                                                                                init_extra_indexes=["create index if not exists pubkey_ln_address_ln_address on pubkey_ln_address (ln_address asc)",
                                                                                                   ])
+##
+    est.dyn[:relay_list_metadata] = DB.ShardedSqliteDict{Nostr.PubKeyId, Nostr.EventId}("$(est.commons.directory)/db/relay_list_metadata"; est.commons.dbargs...,
+                                                                                        table="relay_list_metadata",
+                                                                                        keycolumn="pubkey",
+                                                                                        valuecolumn="event_id")
 ##
     est.periodic_task_running[] = true
     est.periodic_task[] = errormonitor(@async while est.periodic_task_running[]
