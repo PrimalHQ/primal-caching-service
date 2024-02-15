@@ -1148,7 +1148,7 @@ function get_user_relays(est::DB.CacheStorage; pubkey)
             d = try JSON.parse(e.content) catch _ Dict() end
             for (url, dd) in d
                 for (k, v) in dd
-                    v && push!(relays, ["r", url, k])
+                    v && !isempty(url) && push!(relays, ["r", url, k])
                 end
             end
         end
