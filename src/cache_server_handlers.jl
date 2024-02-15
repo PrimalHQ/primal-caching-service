@@ -103,7 +103,7 @@ function app_funcall(funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol,
               append!(res, Base.invokelatest(getproperty(App(), funcall), est(); kwargs..., kwargs_extra...))
               if time_exceeded()
                   # @show (:time_exceeded, Dates.now(), funcall)
-                  push(res, (; kind=App().PARTIAL_RESPONSE))
+                  push!(res, (; kind=App().PARTIAL_RESPONSE))
               end
               res
           end)
