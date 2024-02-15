@@ -921,22 +921,24 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
 
             parent_eid = nothing
             for tag in e.tags
-                if length(tag.fields) >= 4
-                    if tag.fields[1] == "e" && tag.fields[4] in ["root", "reply"]
-                        if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
-                            parent_eid = eid
-                        end
+                if length(tag.fields) >= 4 && tag.fields[1] == "e" && tag.fields[4] == "reply"
+                    if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
+                        parent_eid = eid
                     end
                 end
             end
-            if isnothing(parent_eid)
-                for tag in e.tags
-                    if length(tag.fields) >= 2
-                        if tag.fields[1] == "e" && (length(tag.fields) < 4 || !(tag.fields[4] in ["mention"]))
-                            if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
-                                parent_eid = eid
-                            end
-                        end
+            isnothing(parent_eid) && for tag in e.tags
+                if length(tag.fields) >= 4 && tag.fields[1] == "e" && tag.fields[4] == "root"
+                    if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
+                        parent_eid = eid
+                        break
+                    end
+                end
+            end
+            isnothing(parent_eid) && for tag in e.tags
+                if length(tag.fields) >= 2 && tag.fields[1] == "e" && (length(tag.fields) < 4 || tag.fields[4] != "mention")
+                    if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
+                        parent_eid = eid
                     end
                 end
             end
