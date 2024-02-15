@@ -394,13 +394,16 @@ function feed(
         elseif notes == :authored; [pubkey]
         else;                      error("unsupported type of notes")
         end
-        @threads for p in pubkeys
+        pubkeys = sort(pubkeys)
+        tdur = @elapsed @threads for p in pubkeys
             time_exceeded() && break
+            yield()
             append!(posts, map(Tuple, DB.exe(est.pubkey_events, DB.@sql("select event_id, created_at from kv 
                                                                         where pubkey = ? and created_at >= ? and created_at <= ? and (is_reply = 0 or is_reply = ?)
                                                                         order by created_at desc limit ? offset ?"),
                                              p, since, until, Int(include_replies), limit, offset)))
         end
+        # @show (limit, length(pubkeys), tdur, Nostr.hex(pubkey))
     end
 
     posts = sort(posts.wrapped, by=p->-p[2])[1:min(limit, length(posts))]
