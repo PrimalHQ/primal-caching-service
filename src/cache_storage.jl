@@ -750,7 +750,7 @@ event_stats_by_pubkey_insert_q = sql("insert into kv ($event_stats_fields) value
 already_imported_check_lock = ReentrantLock()
 parameterized_replaceable_list_lock = ReentrantLock()
 
-function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
+function import_msg_into_storage(msg::String, est::CacheStorage; force=false, disable_daily_stats=false)
     import_msg_into_storage(msg, est.commons)
 
     lock(est.tidcnts) do tidcnts; tidcnts[Threads.threadid()] += 1; end
@@ -822,7 +822,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false)
 
     incr(est, :tags; by=length(e.tags))
 
-    catch_exception(est, msg) do
+    disable_daily_stats || catch_exception(est, msg) do
         lock(est.commons.stats) do _
             d = string(Dates.Date(Dates.now()))
             if !dyn_exists(est, :daily_stats, :human_event, d, e.pubkey)
