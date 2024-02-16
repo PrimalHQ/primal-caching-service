@@ -282,16 +282,22 @@ end
 
 struct GCTask
     running::ThreadSafe{Base.RefValue{Bool}}
+    full::Base.RefValue{Bool}
     period::Base.RefValue{Int}
+    execution_stats::Base.RefValue{Any}
     task::Task
-    function GCTask(; period=15)
+    function GCTask(; full=false, period=15)
         running = ThreadSafe(Ref(true))
+        full = Ref(full)
         period = Ref(period)
-        new(running, period, 
+        execution_stats = Ref{Any}(nothing)
+        new(running, full, period, execution_stats,
             Base.errormonitor(@async while running[]
                                   # if Base.gc_live_bytes() >= 10*1024^3
-                                  GC.gc(false)
-                                  ccall(:malloc_trim, Cint, (Cint,), 0)
+                                  execution_stats[] = @timed begin
+                                      GC.gc(full[])
+                                      ccall(:malloc_trim, Cint, (Cint,), 0)
+                                  end
                                   # end
                                   active_sleep(period[], running)
                               end))

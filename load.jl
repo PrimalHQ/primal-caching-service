@@ -21,7 +21,7 @@ RELAYS_FILE   = get(ENV, "PRIMALSERVER_RELAYS", nothing)
 
 #DB.PRINT_EXCEPTIONS[] = true
 
-gctask = Utils.GCTask()
+gctask = Utils.GCTask(; full=true, period=300)
 
 auto_fetch_missing_events = get(ENV, "PRIMALSERVER_AUTO_FETCH_MISSING_EVENTS", nothing) == "1"
 
