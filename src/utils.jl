@@ -331,4 +331,39 @@ Base.iterate(dyn::Dyn, i::Int) = iterate(dyn._data, i)
 Base.merge!(dyn::Dyn, v) = merge!(dyn._data, v)
 Base.merge!(dyn::Dyn, v::NamedTuple) = merge!(dyn._data, pairs(v))
 
+function process_collection(
+        body::Function,
+        collection; 
+        running=PressEnterToStop()|>ThreadSafe,
+        errors=Ref(0)|>ThreadSafe,
+        error_kinds=DataStructures.Accumulator{String,Int}()|>ThreadSafe,
+    )
+    i = Ref(0) |> ThreadSafe
+    Threads.@threads for x in collection
+        yield()
+        running[] || break
+        f = nothing
+        try 
+            f = body(x)
+        catch ex
+            errors[] += 1
+            # exty = ex isa ErrorException ? string(ex) : string(typeof(ex))
+            exty = string(typeof(ex))
+            exty = first(exty, 100)
+            haskey(error_kinds, exty) || lock(i) do _
+                Utils.print_exceptions()
+            end
+            error_kinds[exty] += 1
+        end
+        lock(i) do i
+            i[] += 1
+            if i[] % 1000 == 0
+                s = isnothing(f) ? "" : f()
+                print("$(i[])/$(length(collection))  errors:$(errors[]) error_kinds:$(length(error_kinds))$s\r")
+            end
+        end
+    end
+    (; running, errors, error_kinds)
+end
+
 end
