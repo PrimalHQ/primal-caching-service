@@ -3,6 +3,8 @@ module Nostr
 import StaticArrays
 import JSON
 import SHA
+import MbedTLS
+import Base64
 
 struct EventId; hash::StaticArrays.SVector{32, UInt8}; end
 struct PubKeyId; pk::StaticArrays.SVector{32, UInt8}; end
@@ -85,7 +87,7 @@ function Event(seckey::SecKey, pubkey::PubKeyId, created_at::Int, kind::Int, tag
     eid = event_id(pubkey, created_at, kind, tags, content)
     Event(eid,
           pubkey, created_at, kind, tags, content,
-          Schnorr.generate_signature(collect(seckey.sk), collect(eid.hash)))
+          Secp256k1.generate_signature(collect(seckey.sk), collect(eid.hash)))
 end
 
 for ty in [EventId, SecKey, PubKeyId, Sig]
@@ -103,15 +105,15 @@ JSON.lower(sig::Sig) = hex(sig)
 # JSON.lower(tag::TagP) = ["p", tag.pubkey_id, json_lower_relay_url(tag.relay_url)..., tag.extra...]
 JSON.lower(tag::TagAny) = tag.fields
 
-include("schnorr.jl")
+include("secp256k1.jl")
 
 function generate_keypair()
-    seckey, pubkey = Schnorr.generate_keypair()
+    seckey, pubkey = Secp256k1.generate_keypair()
     SecKey(seckey), PubKeyId(pubkey)
 end
 
-# Schnorr.verify(ctx::Schnorr.Secp256k1Ctx, e::Event) = Schnorr.verify(ctx, collect(e.id.hash), collect(e.pubkey.pk), collect(e.sig.sig))
-Schnorr.verify(e::Event) = Schnorr.verify(collect(e.id.hash), collect(e.pubkey.pk), collect(e.sig.sig))
+# Secp256k1.verify(ctx::Secp256k1.Secp256k1Ctx, e::Event) = Secp256k1.verify(ctx, collect(e.id.hash), collect(e.pubkey.pk), collect(e.sig.sig))
+Secp256k1.verify(e::Event) = Secp256k1.verify(collect(e.id.hash), collect(e.pubkey.pk), collect(e.sig.sig))
 
 function event_id(pubkey::PubKeyId, created_at::Int, kind::Int, tags::Vector, content::String)::EventId
     [0,
@@ -125,7 +127,7 @@ end
 
 function verify(e::Event)
     e.id == event_id(e.pubkey, e.created_at, e.kind, e.tags, e.content) || return false
-    Schnorr.verify(e) || return false
+    Secp256k1.verify(e) || return false
     true
 end
 
@@ -171,6 +173,43 @@ function bech32_encode(input::Vector{UInt8}, hrp::AbstractString)
         return String(outdata[1:findfirst([0x00], outdata).start-1])
     end
     nothing
+end
+
+function nip04_encrypt(seckey::SecKey, pubkey::PubKeyId, msg::Vector{UInt8}, iv::Vector{UInt8})::Vector{UInt8}
+    @assert length(iv) == 16
+    secret = Secp256k1.create_shared_secret(collect(pubkey.pk), collect(seckey.sk))
+    MbedTLS.encrypt(MbedTLS.CIPHER_AES_256_CBC, secret, msg, iv)
+end
+
+function nip04_encrypt(seckey::SecKey, pubkey::PubKeyId, msg::String)::String
+    iv = rand(UInt8, 16)
+    encbytes = nip04_encrypt(seckey, pubkey, map(UInt8, transcode(UInt8, msg)), iv)
+    "$(Base64.base64encode(encbytes))?iv=$(Base64.base64encode(iv))"
+end
+
+function nip04_decrypt(seckey::SecKey, pubkey::PubKeyId, encmsg::Vector{UInt8}, iv::Vector{UInt8})::Vector{UInt8}
+    @assert length(iv) == 16
+    secret = Secp256k1.create_shared_secret(collect(pubkey.pk), collect(seckey.sk))
+    MbedTLS.decrypt(MbedTLS.CIPHER_AES_256_CBC, secret, encmsg, iv)
+end
+
+function nip04_decrypt(seckey::SecKey, pubkey::PubKeyId, encmsg::String)::String
+    parts = split(encmsg, "?iv=")
+    msgbytes = Base64.base64decode(parts[1])
+    iv = Base64.base64decode(parts[2])
+    String(nip04_decrypt(seckey, pubkey, msgbytes, iv))
+end
+
+function nip04_test()
+    sk1, pk1 = SecKey("4f1e068572f04922787e79d3c3e9cacfdbaac34a153c8b827dbb919c3fa7830e"), PubKeyId("e89559104c96f2001c04ab1cf78a53bca8bb6d664ee0e058cbcf8935b0db45a1")
+    sk2, pk2 = SecKey("7fa5f2185b0a9698130b284f024ea72915eb9fabe9bf1e2b8da9ea350abafe32"), PubKeyId("0e45904bde9ee8762ea62c8b0edd910062ffa86851508a704e1627a85c563679")
+
+    msg = "hola"^30
+    s = nip04_encrypt(sk1, pk2, msg)
+    msg2 = nip04_decrypt(sk2, pk1, s)
+    @assert msg == msg2
+
+    @assert "hola" == nip04_decrypt(sk2, pk1, "WR5kXpPeyChjQU93V4nAfQ==?iv=roFcA58RlIyJMrj5VVoHwg==")
 end
 
 end

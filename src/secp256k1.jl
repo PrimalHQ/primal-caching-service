@@ -1,33 +1,6 @@
-module Schnorr
+module Secp256k1
 
 const SECP256K1_CONTEXT_NONE = 1
-
-# mutable struct Secp256k1Ctx
-#     ptr::Ptr{Cvoid}
-#     xonlypk::Vector{UInt8}
-#     function Secp256k1Ctx()
-#         ptr = @ccall :libsecp256k1.secp256k1_context_create(SECP256K1_CONTEXT_NONE::Int32)::Ptr{Cvoid}
-#         ptr == 0 && error("secp256k1_context_create failed")
-#         finalizer(destroy!, new(ptr, zeros(UInt8, 64)))
-#     end
-# end
-
-# function destroy!(ctx::Secp256k1Ctx)
-#     @ccall :libsecp256k1.secp256k1_context_destroy(ctx.ptr::Ptr{Cvoid})::Cvoid
-#     ctx.ptr = C_NULL
-#     nothing
-# end
-
-# function verify(msg::Vector{UInt8}, pubkey::Vector{UInt8}, sig::Vector{UInt8})
-#     verify(Secp256k1Ctx(), msg, pubkey, sig)
-# end
-
-# function verify(ctx::Secp256k1Ctx, msg::Vector{UInt8}, pubkey::Vector{UInt8}, sig::Vector{UInt8})
-#     if (@ccall :libsecp256k1.secp256k1_xonly_pubkey_parse(ctx.ptr::Ptr{Cvoid}, pointer(ctx.xonlypk)::Ptr{UInt8}, pointer(pubkey)::Ptr{UInt8})::Int32) == 0
-#         error("parsing of pubkey failed")
-#     end
-#     (@ccall :libsecp256k1.secp256k1_schnorrsig_verify(ctx.ptr::Ptr{Cvoid}, pointer(sig)::Ptr{UInt8}, pointer(msg)::Ptr{UInt8}, Int32(length(msg))::Int32, pointer(ctx.xonlypk)::Ptr{UInt8})::Int32) != 0
-# end
 
 function with_context(body::Function; randomize=true)
     ctx = @ccall :libsecp256k1.secp256k1_context_create(SECP256K1_CONTEXT_NONE::Int32)::Ptr{Cvoid}
@@ -69,6 +42,8 @@ function generate_keypair()
 end
 
 function pubkey_of_seckey(seckey::Vector{UInt8})
+    @assert length(seckey) == 32
+
     with_context() do ctx
         keypair = zeros(UInt8, 96)
         pubkey = zeros(UInt8, 64)
@@ -87,6 +62,7 @@ function pubkey_of_seckey(seckey::Vector{UInt8})
 end
 
 function generate_signature(seckey::Vector{UInt8}, msg_hash::Vector{UInt8})
+    @assert length(seckey) == 32
     @assert length(msg_hash) == 32
 
     with_context() do ctx
@@ -105,6 +81,10 @@ function generate_signature(seckey::Vector{UInt8}, msg_hash::Vector{UInt8})
 end
 
 function verify(msg_hash::Vector{UInt8}, serialized_pubkey::Vector{UInt8}, signature::Vector{UInt8})
+    @assert length(msg_hash) == 32
+    @assert length(serialized_pubkey) == 32
+    @assert length(signature) == 64
+
     with_context(; randomize=false) do ctx
         pubkey = zeros(UInt8, 64)
         GC.@preserve msg_hash serialized_pubkey signature pubkey begin
@@ -116,17 +96,43 @@ function verify(msg_hash::Vector{UInt8}, serialized_pubkey::Vector{UInt8}, signa
     end
 end
 
+null_hashfp = @cfunction(function (output, x32, y32, data)
+                             unsafe_copyto!(output, x32, 32)
+                             Cint(1)
+                         end, 
+                         Cint, 
+                         (Ptr{UInt8}, Ptr{UInt8}, Ptr{UInt8}, Ptr{Cvoid}))
+
+function create_shared_secret(serialized_pubkey::Vector{UInt8}, seckey::Vector{UInt8})
+    @assert length(serialized_pubkey) == 32
+    @assert length(seckey) == 32
+
+    with_context() do ctx
+        secret = zeros(UInt8, 32)
+        pubkey = zeros(UInt8, 64)
+
+        GC.@preserve serialized_pubkey seckey secret pubkey begin
+            if (@ccall :libsecp256k1.secp256k1_xonly_pubkey_parse(ctx::Ptr{Cvoid}, pointer(pubkey)::Ptr{UInt8}, pointer(serialized_pubkey)::Ptr{UInt8})::Int32) == 0
+                error("parsing of serialized_pubkey failed")
+            end
+            @assert (@ccall :libsecp256k1.secp256k1_ecdh(ctx::Ptr{Cvoid}, pointer(secret)::Ptr{UInt8}, pointer(pubkey)::Ptr{UInt8}, pointer(seckey)::Ptr{UInt8}, null_hashfp::Ptr{Cvoid}, C_NULL::Ptr{Cvoid})::Cint) != 0
+            secret
+        end
+    end
+end
+
 begin
-    # local ctx = Secp256k1Ctx()
-    local msg = hex2bytes("01a36e30a4117ba974f786c9135c198116d4bb100c516bc59fac48948ecb5abf")
-    local pk  = hex2bytes("932fedb11d131b720362372e8248ecd79cb72e16aecba31b0650e4c2ff21ed00")
-    local sig = hex2bytes("20c8a626e8b2f70a86938af2fca509a69910111dc735525e15e0ec36e020a12529e7d3116e60126c135f8345353acc9c82a00bfea394007a625d5ecccc0741cc")
-    try
-        # @assert verify(ctx, msg, pk, sig)
+    let msg = hex2bytes("01a36e30a4117ba974f786c9135c198116d4bb100c516bc59fac48948ecb5abf"),
+        pk  = hex2bytes("932fedb11d131b720362372e8248ecd79cb72e16aecba31b0650e4c2ff21ed00"),
+        sig = hex2bytes("20c8a626e8b2f70a86938af2fca509a69910111dc735525e15e0ec36e020a12529e7d3116e60126c135f8345353acc9c82a00bfea394007a625d5ecccc0741cc")
         @assert verify(msg, pk, sig)
         global benchfunc() = verify(msg, pk, sig)
-    finally
-        # destroy!(ctx)
+    end
+
+    let sk  = hex2bytes("4f1e068572f04922787e79d3c3e9cacfdbaac34a153c8b827dbb919c3fa7830e"),
+        pk  = hex2bytes("0e45904bde9ee8762ea62c8b0edd910062ffa86851508a704e1627a85c563679"),
+        sec = hex2bytes("26c3d58e5cdf72104cc9b1672cd8eafb4a51523856b108aa545ef4ed8b9a0b90")
+        @assert sec == create_shared_secret(pk, sk)
     end
 end
 
