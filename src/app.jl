@@ -948,11 +948,13 @@ function import_events(est::DB.CacheStorage; events::Vector=[])
     cnt = Ref(0)
     errcnt = Ref(0)
     for e in events
+        e = Nostr.Event(e)
         try
             msg = JSON.json([time(), nothing, ["EVENT", "", e]])
             if DB.import_msg_into_storage(msg, est)
                 cnt[] += 1
             end
+            ext_import_event(est, e)
         catch _ 
             errcnt[] += 1
         end
@@ -1153,7 +1155,7 @@ function get_user_relays(est::DB.CacheStorage; pubkey)
             end
         end
     end
-    isempty(relays) || push!(res, (; kind=Int(USER_RELAYS), tags=sort(collect(relays))))
+    push!(res, (; kind=Int(USER_RELAYS), tags=sort(collect(relays))))
     res
 end
 
@@ -1165,5 +1167,6 @@ function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol
 function ext_event_response(est::DB.CacheStorage, e::Nostr.Event); []; end
 function ext_user_get_settings(est::DB.CacheStorage, pubkey); end
 function ext_invalidate_cached_content_moderation(est::DB.CacheStorage, user_pubkey::Union{Nothing,Nostr.PubKeyId}); end
+function ext_import_event(est::DB.CacheStorage, e::Nostr.Event) end
 
 end
