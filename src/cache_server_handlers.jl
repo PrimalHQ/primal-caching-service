@@ -180,7 +180,7 @@ function initial_filter_handler(conn::Conn, subid, filters)
             end
         end
     catch ex
-        PRINT_EXCEPTIONS[] && Utils.print_exceptions()
+        PRINT_EXCEPTIONS[] && !(ex isa Base.IOError) && Utils.print_exceptions()
         ex isa TaskFailedException && (ex = ex.task.result)
         try send_error(ex isa ErrorException ? ex.msg : UNKNOWN_ERROR_MESSAGE[]) catch _ end
     end
