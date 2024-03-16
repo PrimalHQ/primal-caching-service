@@ -210,6 +210,12 @@ function nip04_test()
     @assert msg == msg2
 
     @assert "hola" == nip04_decrypt(sk2, pk1, "WR5kXpPeyChjQU93V4nAfQ==?iv=roFcA58RlIyJMrj5VVoHwg==")
+
+    sender_sk = SecKey("6b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e")
+    sender_pk = Secp256k1.pubkey_of_seckey(sender_sk.sk |> collect) |> Nostr.PubKeyId
+    receiver_sk = SecKey("7b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e")
+    receiver_pk = Secp256k1.pubkey_of_seckey(receiver_sk.sk |> collect) |> Nostr.PubKeyId
+    @assert nip04_decrypt(receiver_sk, sender_pk, "dJc+WbBgaFCD2/kfg1XCWJParplBDxnZIdJGZ6FCTOg=?iv=M6VxRPkMZu7aIdD+10xPuw==") == "Saturn, bringer of old age"
 end
 
 end
