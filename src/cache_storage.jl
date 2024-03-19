@@ -202,8 +202,8 @@ Base.@kwdef struct DeduplicatedEventStorage <: EventStorage
 
     files = Dict{String, OpenedFile}() |> ThreadSafe
 
-    max_open_file_age = 1*60
-    close_files_periodically = Throttle(; period=5.0)
+    max_open_file_age = 2*60
+    close_files_periodically = Throttle(; period=10.0)
 end
 
 Base.@kwdef struct CacheStorage <: EventStorage
@@ -634,28 +634,21 @@ function import_msg_into_storage(msg::String, est::DeduplicatedEventStorage; for
     incr(est, :any)
 
     fn = dedup_message_log_filename(est.commons.directory * "/messages", e.created_at)
-    fout = lock(est.files) do files
-        get!(files, fn) do
+
+    pos = lock(est.files) do files
+        fout = get!(files, fn) do
             OpenedFile(open(fn, "a"), Ref(time()))
             # open(fn * ".inuse") do; end
         end
-    end
-
-    exe(est.deduped_events,
-        @sql("insert into kv (event_id, pubkey, kind, created_at, processed_at, file_position, times_seen) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)"), 
-        e.id, e.pubkey, e.kind, e.created_at, trunc(Int, time()), position(fout.io), 1)
-
-    lock(est.files) do _ #!!
+        pos = position(fout.io)
         println(fout.io, msg)
         flush(fout.io)
-    end
-    fout.t_last_write[] = time()
+        fout.t_last_write[] = time()
 
-    est.close_files_periodically() do
-        lock(est.files) do files
+        est.close_files_periodically() do
             closed_files = String[]
             for (fn, f) in collect(files)
-                if time()-fout.t_last_write[] >= est.max_open_file_age
+                if time()-f.t_last_write[] >= est.max_open_file_age
                     close(f.io)
                     # rm(fn * ".inuse")
                     push!(closed_files, fn)
@@ -665,7 +658,13 @@ function import_msg_into_storage(msg::String, est::DeduplicatedEventStorage; for
                 delete!(est.files, fn)
             end
         end
+
+        isempty(exe(est.deduped_events, @sql("select 1 from kv where event_id = ?1 limit 1"), eid)) ? pos : nothing
     end
+
+    isnothing(pos) || exe(est.deduped_events,
+                          @sql("insert into kv (event_id, pubkey, kind, created_at, processed_at, file_position, times_seen) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)"), 
+                          e.id, e.pubkey, e.kind, e.created_at, trunc(Int, time()), pos, 1)
 
     lock(est.commons.message_processors) do message_processors
         for func in values(message_processors)
