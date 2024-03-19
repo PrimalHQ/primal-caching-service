@@ -654,6 +654,8 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
                                    ext_user_profile(est, pubkey)...,
                                   ))))
 
+    append!(res, ext_user_profile_media(est, pubkey))
+
     !isnothing(user_pubkey) && is_hidden(est, user_pubkey, :content, pubkey) && append!(res, search_filterlist(est; pubkey, user_pubkey))
 
     res.wrapped
@@ -1161,6 +1163,7 @@ end
 
 function ext_user_infos(est::DB.CacheStorage, res, res_meta_data) end
 function ext_user_profile(est::DB.CacheStorage, pubkey); (;); end
+function ext_user_profile_media(est::DB.CacheStorage, pubkey); []; end
 function ext_is_hidden(est::DB.CacheStorage, eid::Nostr.EventId); false; end
 function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, pubkey::Nostr.PubKeyId); false; end
 function ext_is_hidden_by_group(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.EventId); false; end
