@@ -6,6 +6,7 @@ for fn in [
            "db.jl",
            "metrics_logger.jl",
            "app.jl",
+           "perf_test_delegation.jl",
            "cache_server_handlers.jl",
            "cache_server.jl",
           ]

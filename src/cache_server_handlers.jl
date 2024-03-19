@@ -1,5 +1,6 @@
 module CacheServerHandlers
 
+import HTTP
 using HTTP.WebSockets
 import JSON
 using DataStructures: CircularBuffer
@@ -8,6 +9,7 @@ import ..Utils
 using ..Utils: ThreadSafe, Throttle
 import ..Nostr
 import ..MetricsLogger
+import ..PerfTestDelegation
 
 PRINT_EXCEPTIONS = Ref(false)
 
@@ -33,11 +35,13 @@ function ext_funcall(funcall, kwargs, kwargs_extra, ws_id) end
 
 function on_connect(ws)
     conns[ws] = Conn(ThreadSafe(ws), ThreadSafe(Dict{Tsubid, Tfilters}()))
+    PerfTestDelegation.enabled() && PerfTestDelegation.start_replication(ws.id)
     ext_on_connect(ws)
 end
 
 function on_disconnect(ws)
     delete!(conns, ws)
+    PerfTestDelegation.enabled() && PerfTestDelegation.stop_replication(ws.id)
     ext_on_disconnect(ws)
 end
 
@@ -49,10 +53,24 @@ function on_client_message(ws, msg)
             subid = d[2]
             filters = d[3:end]
             conn.subs[subid] = filters
+
+            PerfTestDelegation.enabled() && for filt in filters
+                if haskey(filt, "cache")
+                    local filt = filt["cache"]
+                    funcall = Symbol(filt[1])
+                    if funcall in PerfTestDelegation.FUNCS
+                        PerfTestDelegation.send_msg(ws.id, msg)
+                    end
+                end
+            end
+
             initial_filter_handler(conn, subid, filters)
+
         elseif d[1] == "CLOSE"
             subid = d[2]
             delete!(conn.subs, subid)
+            PerfTestDelegation.enabled() && PerfTestDelegation.send_msg(ws.id, msg)
+
         end
     catch _
         PRINT_EXCEPTIONS[] && Utils.print_exceptions()
