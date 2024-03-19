@@ -131,7 +131,7 @@ function event_actions_cnt(est::DB.CacheStorage, eid::Nostr.EventId, user_pubkey
     end
 end
 
-function event_actions(est::DB.CacheStorage; event_id, kind::Int, limit=100)
+function event_actions(est::DB.CacheStorage; event_id, kind::Int, limit=100, offset=0)
     limit <= 1000 || error("limit too big")
     event_id = cast(event_id, Nostr.EventId)
     res = []
@@ -140,8 +140,8 @@ function event_actions(est::DB.CacheStorage; event_id, kind::Int, limit=100)
                              DB.@sql("select ref_event_id, ref_pubkey from kv 
                                      where event_id = ?1 and ref_kind = ?2 
                                      order by ref_created_at desc
-                                     limit ?3"),
-                             event_id, kind, limit)
+                                     limit ?3 offset ?4"),
+                             event_id, kind, limit, offset)
         push!(pks, Nostr.PubKeyId(pk))
         reid = Nostr.EventId(reid)
         reid in est.events && push!(res, est.events[reid])
