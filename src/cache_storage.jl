@@ -24,7 +24,7 @@ hashfunc(::Type{Nostr.PubKeyId}) = pk->pk.pk[32]
 hashfunc(::Type{Tuple{Nostr.PubKeyId, Nostr.EventId}}) = p->p[1].pk[32]
 
 MAX_MESSAGE_SIZE = Ref(100_000) |> ThreadSafe
-kindints = map(Int, instances(Nostr.Kind))
+kindints = [map(Int, collect(instances(Nostr.Kind))); [Nostr.BOOKMARKS]]
 
 term_lines = try parse(Int, strip(read(`tput lines`, String))) catch _ 15 end
 threadprogress = Dict{Int, Any}() |> ThreadSafe
@@ -1053,6 +1053,10 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
             if !haskey(est.dyn[:relay_list_metadata], e.pubkey) || est.events[est.dyn[:relay_list_metadata][e.pubkey]].created_at < e.created_at
                 est.dyn[:relay_list_metadata][e.pubkey] = e.id
             end
+        elseif e.kind == Int(Nostr.BOOKMARKS)
+            if !haskey(est.dyn[:bookmarks], e.pubkey) || est.events[est.dyn[:bookmarks][e.pubkey]].created_at < e.created_at
+                est.dyn[:bookmarks][e.pubkey] = e.id
+            end
         end
     end
 
@@ -1228,6 +1232,11 @@ function init(est::CacheStorage, running=Ref(true))
 ##
     est.dyn[:relay_list_metadata] = DB.ShardedSqliteDict{Nostr.PubKeyId, Nostr.EventId}("$(est.commons.directory)/db/relay_list_metadata"; est.commons.dbargs...,
                                                                                         table="relay_list_metadata",
+                                                                                        keycolumn="pubkey",
+                                                                                        valuecolumn="event_id")
+##
+    est.dyn[:bookmarks] = DB.ShardedSqliteDict{Nostr.PubKeyId, Nostr.EventId}("$(est.commons.directory)/db/bookmarks"; est.commons.dbargs...,
+                                                                                        table="bookmarks",
                                                                                         keycolumn="pubkey",
                                                                                         valuecolumn="event_id")
 ##

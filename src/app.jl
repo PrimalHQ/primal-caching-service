@@ -39,6 +39,7 @@ exposed_functions = Set([:feed,
                          :is_hidden_by_content_moderation,
                          :user_of_ln_address,
                          :get_user_relays,
+                         :get_bookmarks,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -390,6 +391,28 @@ function feed(
                                                                     where pubkey = ? and created_at >= ? and created_at <= ? and is_reply = 1
                                                                     order by created_at desc limit ? offset ?"),
                                          pubkey, since, until, limit, offset)))
+    elseif notes == :bookmarks
+        if !isempty(local r = get_bookmarks(est; pubkey))
+            bm = r[1]
+            bms = []
+            for t in bm.tags
+                if length(t.fields) >= 2 && t.fields[1] == "e" && !isnothing(local eid = try Nostr.EventId(t.fields[2]) catch _ end)
+                    if eid in est.events 
+                        e = est.events[eid]
+                        created_at = est.event_created_at[eid]
+                        push!(bms, (collect(eid.hash), created_at))
+                    end
+                end
+            end
+            i = 0
+            for (eid, created_at) in sort(bms; by=r->-r[2])
+                length(posts) >= limit && break
+                if since <= created_at <= until
+                    i >= offset && push!(posts, (eid, created_at))
+                    i += 1
+                end
+            end
+        end
     else
         pubkeys = 
         if     notes == :follows;  follows(est, pubkey)
@@ -1158,6 +1181,19 @@ function get_user_relays(est::DB.CacheStorage; pubkey)
         end
     end
     push!(res, (; kind=Int(USER_RELAYS), tags=sort(collect(relays))))
+    res
+end
+
+function get_bookmarks(est::DB.CacheStorage; pubkey)
+    pubkey = castmaybe(pubkey, Nostr.PubKeyId)
+    res = []
+    if haskey(est.dyn[:bookmarks], pubkey)
+        eid = est.dyn[:bookmarks][pubkey]
+        if haskey(est.events, eid)
+            e = est.events[eid]
+            push!(res, e)
+        end
+    end
     res
 end
 

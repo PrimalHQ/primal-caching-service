@@ -36,6 +36,7 @@ end
     CATEGORIZED_PEOPLE=30000
     LONG_FORM_CONTENT=30023
 end
+BOOKMARKS=10003
 
 struct Event
     id::EventId # <32-bytes lowercase hex-encoded sha256 of the the serialized event data>
