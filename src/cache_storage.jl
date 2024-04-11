@@ -561,7 +561,9 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkey
         push!(mentiontags, tag)
     end
     for tag in e.tags
-        length(tag.fields) >= 4 && tag.fields[4] == "mention" && push!(mentiontags, tag)
+        if length(tag.fields) >= 2 && tag.fields[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+            push!(mentiontags, tag)
+        end
     end
     for m in eachmatch(re_mention, e.content)
         s = m.captures[1]
@@ -581,9 +583,9 @@ end
 function event_from_msg(m)
     t, md, d = m
     if d != nothing && length(d) >= 3 && d[1] == "EVENT"
-        return Nostr.dict2event(d[3])
+        return get(md, "relay_url", nothing), Nostr.dict2event(d[3])
     end
-    nothing
+    nothing, nothing
 end
 
 function verify(est::EventStorage, e)
@@ -621,7 +623,7 @@ function import_msg_into_storage(msg::String, est::DeduplicatedEventStorage; for
         incr(est, :seen)
     end
 
-    e = try
+    relay_url, e = try
         event_from_msg(JSON.parse(msg))
     catch _
         incr(est, :parseerr)
@@ -750,11 +752,13 @@ already_imported_check_lock = ReentrantLock()
 parameterized_replaceable_list_lock = ReentrantLock()
 
 function import_msg_into_storage(msg::String, est::CacheStorage; force=false, disable_daily_stats=false)
+    length(msg) > MAX_MESSAGE_SIZE[] && return false
+
     import_msg_into_storage(msg, est.commons)
 
     lock(est.tidcnts) do tidcnts; tidcnts[Threads.threadid()] += 1; end
 
-    e = try
+    relay_url, e = try
         event_from_msg(JSON.parse(msg))
     catch _
         incr(est, :parseerr)
@@ -788,6 +792,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
     est.events[e.id] = e
     est.event_created_at[e.id] = e.created_at
 
+    est.dyn[:event_relay][e.id] = relay_url
 
     if !(e.pubkey in est.pubkey_ids)
         push!(est.pubkey_ids, e.pubkey)
@@ -1239,6 +1244,11 @@ function init(est::CacheStorage, running=Ref(true))
                                                                                         table="bookmarks",
                                                                                         keycolumn="pubkey",
                                                                                         valuecolumn="event_id")
+##
+    est.dyn[:event_relay] = DB.ShardedSqliteDict{Nostr.EventId, String}("$(est.commons.directory)/db/event_relay"; est.commons.dbargs...,
+                                                                                        table="event_relay",
+                                                                                        keycolumn="event_id",
+                                                                                        valuecolumn="relay_url")
 ##
     est.periodic_task_running[] = true
     est.periodic_task[] = errormonitor(@async while est.periodic_task_running[]

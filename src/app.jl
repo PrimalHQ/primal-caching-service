@@ -67,6 +67,7 @@ NOSTR_STATS=10_000_136
 IS_HIDDEN_BY_CONTENT_MODERATION=10_000_137
 USER_PUBKEY=10_000_138
 USER_RELAYS=10_000_139
+EVENT_RELAYS=10_000_141
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -101,7 +102,8 @@ function follows(est::DB.CacheStorage, pubkey::Nostr.PubKeyId)::Vector{Nostr.Pub
                 try push!(res, Nostr.PubKeyId(t.fields[2])) catch _ end
             end
         end
-        res
+        # res
+        first(res, 1600)
     else
         []
     end
@@ -285,6 +287,8 @@ function is_hidden(est::DB.CacheStorage, user_pubkey, scope::Symbol, eid::Nostr.
     ext_is_hidden_by_group(est, user_pubkey, scope, eid)
 end
 
+RELAY_URL_MAP = Dict{String, String}()
+
 function response_messages_for_posts(
         est::DB.CacheStorage, eids::Vector{Nostr.EventId}; 
         res_meta_data=Dict(), user_pubkey=nothing,
@@ -294,6 +298,8 @@ function response_messages_for_posts(
 
     pks = Set{Nostr.PubKeyId}() |> ThreadSafe
     res_meta_data = res_meta_data |> ThreadSafe
+
+    event_relays = Dict{Nostr.EventId, String}()
 
     function handle_event(body::Function, eid::Nostr.EventId; wrapfun::Function=identity)
         ext_is_hidden(est, eid) && return
@@ -308,6 +314,7 @@ function response_messages_for_posts(
         isnothing(user_pubkey) || union!(res, event_actions_cnt(est, e.id, user_pubkey))
         push!(pks, e.pubkey)
         union!(res, ext_event_response(est, e))
+        haskey(est.dyn[:event_relay], eid) && (event_relays[eid] = est.dyn[:event_relay][eid])
 
         extra_tags = Nostr.Tag[]
         DB.for_mentiones(est, e) do tag
@@ -355,6 +362,8 @@ function response_messages_for_posts(
             res_meta_data[pk] = est.events[est.meta_data[pk]]
         end
     end
+
+    !isempty(event_relays) && union!(res, [(; kind=Int(EVENT_RELAYS), content=JSON.json(Dict([Nostr.hex(k)=>get(RELAY_URL_MAP, v, v) for (k, v) in event_relays])))])
 
     res = collect(res)
 
