@@ -583,7 +583,7 @@ end
 function event_from_msg(m)
     t, md, d = m
     if d != nothing && length(d) >= 3 && d[1] == "EVENT"
-        return get(md, "relay_url", nothing), Nostr.dict2event(d[3])
+        return (isnothing(md) ? nothing : get(md, "relay_url", nothing)), Nostr.dict2event(d[3])
     end
     nothing, nothing
 end
@@ -792,7 +792,9 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
     est.events[e.id] = e
     est.event_created_at[e.id] = e.created_at
 
-    est.dyn[:event_relay][e.id] = relay_url
+    if !isnothing(relay_url)
+        est.dyn[:event_relay][e.id] = relay_url
+    end
 
     if !(e.pubkey in est.pubkey_ids)
         push!(est.pubkey_ids, e.pubkey)
