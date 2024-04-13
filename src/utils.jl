@@ -151,6 +151,35 @@ function threaded_task(f::Function)
     register!(t)
 end
 
+Base.@kwdef mutable struct PeriodicTasked <: Tasked
+    active=true
+    task=nothing
+    period=15.0
+    print_exceptions=false
+end
+
+function periodic_tasked(f::Function, period)
+    t = PeriodicTasked(; period)
+    t.task = Base.errormonitor(@async while t.active
+                                   try
+                                       Base.invokelatest(f)
+                                   catch _
+                                       t.print_exceptions && print_exceptions()
+                                   end
+                                   active_sleep(t.period, @refprop(t.active))
+                               end)
+    register!(t)
+end
+
+periodic_taskeds = Dict{Function, PeriodicTasked}()
+function start_periodic_tasked(f::Function, period)
+    periodic_taskeds[f] = periodic_tasked(f, period)
+end
+function stop_periodic_tasked(f::Function, period)
+    stop(periodic_taskeds[f])
+    delete!(periodic_taskeds, f)
+end
+
 export print_exceptions
 function print_exceptions(io=stdout)
     for (exc, bt) in current_exceptions()
