@@ -34,6 +34,7 @@ exposed_functions = Set([:feed,
                          :zaps_feed,
                          :user_zaps,
                          :user_zaps_by_satszapped,
+                         :event_zaps_by_satszapped,
                          :server_name,
                          :nostr_stats,
                          :is_hidden_by_content_moderation,
@@ -337,6 +338,7 @@ function response_messages_for_posts(
     end
 
     for eid in eids
+        union!(res, event_zaps_by_satszapped(est; event_id=eid, limit=10))
         handle_event(eid) do subeid
             yield()
             time_exceeded() && return
@@ -1113,6 +1115,25 @@ function user_zaps_by_satszapped(
                               (receiver, since, until, limit, offset)))
 
     zaps = sort(zaps, by=z->-z[6])[1:min(limit, length(zaps))]
+
+    response_messages_for_zaps(est, zaps; order_by=:amount_sats)
+end
+
+function event_zaps_by_satszapped(
+        est::DB.CacheStorage;
+        event_id,
+        limit::Int=20, since::Int=0, until=nothing, offset::Int=0,
+    )
+    limit <= 1000 || error("limit too big")
+    event_id = cast(event_id, Nostr.EventId)
+
+    isnothing(until) && (until = 1<<61)
+    zaps = map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
+                                                        where event_id = ? and amount_sats >= ? and amount_sats <= ?
+                                                        order by amount_sats desc limit ? offset ?"),
+                              (event_id, since, until, limit, offset)))
+
+    zaps = first(sort(zaps, by=z->-z[6]), limit)
 
     response_messages_for_zaps(est, zaps; order_by=:amount_sats)
 end
