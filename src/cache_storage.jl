@@ -561,9 +561,10 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkey
         push!(mentiontags, tag)
     end
     for tag in e.tags
-        if length(tag.fields) >= 2 && tag.fields[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-            push!(mentiontags, tag)
-        end
+        length(tag.fields) >= 4 && tag.fields[4] == "mention" && push!(mentiontags, tag)
+        # if length(tag.fields) >= 2 && tag.fields[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+        #     push!(mentiontags, tag)
+        # end
     end
     for m in eachmatch(re_mention, e.content)
         s = m.captures[1]
