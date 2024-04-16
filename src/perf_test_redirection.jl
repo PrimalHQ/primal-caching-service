@@ -1,4 +1,4 @@
-module PerfTestDelegation
+module PerfTestRedirection
 
 import HTTP
 using HTTP.WebSockets
@@ -6,10 +6,12 @@ using HTTP.WebSockets
 import ..Utils
 using ..Utils: ThreadSafe
 
-mutable struct Delegation
+mutable struct Redirection
     ws::Union{Nothing, ThreadSafe{WebSocket}}
     task::Union{Nothing, Task}
 end
+
+PRINT_EXCEPTIONS = Ref(false)
 
 TARGET_HOST = Ref{Any}(nothing) |> ThreadSafe
 
@@ -85,26 +87,26 @@ FUNCS = Set{Symbol}([
                      # :broadcast_reply,
                     ]) |> ThreadSafe
 
-delegations = Dict{Base.UUID, Delegation}() |> ThreadSafe
+redirections = Dict{Base.UUID, Redirection}() |> ThreadSafe
 received_msg_cnt = Ref(0) |> ThreadSafe
 
 enabled() = !isnothing(TARGET_HOST[])
 
-function start_replication(ws_id::Base.UUID)
+function start_redirection(ws_id::Base.UUID)
     if enabled()
-        lock(delegations) do delegations
-            p = delegations[ws_id] = Delegation(nothing, nothing)
-            p.task = @async replicator(ws_id)
-            println("delegations: created $ws_id")
+        lock(redirections) do redirections
+            p = redirections[ws_id] = Redirection(nothing, nothing)
+            p.task = @async redirector(ws_id)
+            # println("redirections: created $ws_id")
         end
     end
 end
 
-function stop_replication(ws_id::Base.UUID)
+function stop_redirection(ws_id::Base.UUID)
     ws = Ref{Any}(nothing)
-    lock(delegations) do delegations
-        if haskey(delegations, ws_id)
-            p = delegations[ws_id]
+    lock(redirections) do redirections
+        if haskey(redirections, ws_id)
+            p = redirections[ws_id]
             ws[] = p.ws
         end
     end
@@ -115,54 +117,58 @@ function stop_replication(ws_id::Base.UUID)
     end
 end
 
-function stop_all_replication()
+function stop_all_redirection()
     wss = []
-    lock(delegations) do delegations
-        if haskey(delegations, ws_id)
-            p = delegations[ws_id]
+    lock(redirections) do redirections
+        for p in collect(values(redirections))
             if !isnothing(p.ws)
                 push!(wss, p.ws)
             end
         end
     end
     for ws in wss
-        lock(ws[]) do ws
+        @async lock(ws) do ws
             try close(ws) catch _ end
         end
     end
 end
 
 function send_msg(ws_id::Base.UUID, msg)
+    # println(ws_id, " ", first(msg, 50))
     ws = Ref{Any}(nothing)
-    lock(delegations) do delegations
-        if haskey(delegations, ws_id)
-            p = delegations[ws_id]
+    lock(redirections) do redirections
+        if haskey(redirections, ws_id)
+            p = redirections[ws_id]
             ws[] = p.ws
         end
     end
     if !isnothing(ws[])
-        lock(ws[]) do ws
-            @async try HTTP.WebSockets.send(ws, msg) catch _ end
+        @async lock(ws[]) do ws
+            try HTTP.WebSockets.send(ws, msg) catch _ end
         end
     end
 end
 
-function replicator(ws_id::Base.UUID)
+function redirector(ws_id::Base.UUID)
     addr, port = TARGET_HOST[]
     HTTP.WebSockets.open("ws://$addr:$port"; connect_timeout=10, readtimeout=60) do ws
-        lock(delegations) do delegations
-            delegations[ws_id].ws = ws |> ThreadSafe
+        lock(redirections) do redirections
+            redirections[ws_id].ws = ws |> ThreadSafe
         end
         try
-            for msg in ws
-                lock(received_msg_cnt) do cnt; cnt[] += 1; end
+            try
+                for msg in ws
+                    lock(received_msg_cnt) do cnt; cnt[] += 1; end
+                end
+            finally
+                try close(ws) catch _ end
+                lock(redirections) do redirections
+                    delete!(redirections, ws_id)
+                    # println("redirections: deleted $ws_id")
+                end
             end
-        finally
-            close(ws)
-            lock(delegations) do delegations
-                delete!(delegations, ws_id)
-                println("delegations: deleted $ws_id")
-            end
+        catch _
+            PRINT_EXCEPTIONS[] && Utils.print_exceptions()
         end
     end
 end
