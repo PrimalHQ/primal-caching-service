@@ -1037,7 +1037,6 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
                         end
                     end
                 end
-                zapper_ok[] || println("$(Nostr.hex(zapped_pk)) sent fake zap")
 
                 if zapper_ok[]
                     incr(est, :zaps)
