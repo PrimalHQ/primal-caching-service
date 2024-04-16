@@ -1017,18 +1017,38 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
                     end
                 end
             end
-            if amount_sats > 0 && !isnothing(description)
-                incr(est, :zaps)
-                incr(est, :satszapped; by=amount_sats)
-                if !isnothing(parent_eid)
-                    event_hook(est, parent_eid, (:event_stats_cb, :zaps, +1))
-                    event_pubkey_action(est, parent_eid, 
-                                        Nostr.Event(e.id, zap_sender(e), e.created_at, e.kind, 
-                                                    e.tags, e.content, e.sig),
-                                        :zapped)
-                    ext_zap(est, e, parent_eid, amount_sats)
+            if amount_sats > 0 && !isnothing(description) && !isnothing(zapped_pk)
+                zapper_ok = Ref(false)
+                catch_exception(est, :zapper_check) do # TODO: move to bg task
+                    if zapped_pk in est.meta_data
+                        mdeid = est.meta_data[zapped_pk]
+                        if mdeid in est.events
+                            md = est.events[mdeid]
+                            d = JSON.parse(md.content)
+                            if haskey(d, "lud16")
+                                name, domain = split(strip(d["lud16"]), '@')
+                                dd = JSON.parse(String(HTTP.request("GET", "https://$(domain)/.well-known/lnurlp/$name";
+                                                                    retry=false, connect_timeout=10, readtimeout=10, proxy=Main.PROXY).body))
+                                if haskey(dd, "nostrPubkey")
+                                    zapper_ok[] = Nostr.PubKeyId(dd["nostrPubkey"]) == e.pubkey
+                                end
+                            end
+                        end
+                    end
                 end
-                if !isnothing(zapped_pk)
+                zapper_ok[] || println("$(Nostr.hex(zapped_pk)) sent fake zap")
+
+                if zapper_ok[]
+                    incr(est, :zaps)
+                    incr(est, :satszapped; by=amount_sats)
+                    if !isnothing(parent_eid)
+                        event_hook(est, parent_eid, (:event_stats_cb, :zaps, +1))
+                        event_pubkey_action(est, parent_eid, 
+                                            Nostr.Event(e.id, zap_sender(e), e.created_at, e.kind, 
+                                                        e.tags, e.content, e.sig),
+                                            :zapped)
+                        ext_zap(est, e, parent_eid, amount_sats)
+                    end
                     ext_pubkey_zap(est, e, zapped_pk, amount_sats)
                 end
             end
