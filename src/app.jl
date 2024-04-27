@@ -1027,23 +1027,34 @@ function import_events(est::DB.CacheStorage; events::Vector=[])
     [(; kind=Int(EVENT_IMPORT_STATUS), content=JSON.json((; imported=cnt[], errors=errcnt[])))]
 end
 
-function response_messages_for_zaps(est, zaps; kinds=nothing, order_by=:created_at)
+function response_messages_for_zaps(est, zaps; kinds=nothing, order_by=:created_at, user_pubkey=nothing)
     res_meta_data = Dict()
     res = []
     for (zap_receipt_id, created_at, event_id, sender, receiver, amount_sats) in zaps
+        hidden = false
+        try
+            sender = Nostr.PubKeyId(sender)
+            receiver = Nostr.PubKeyId(receiver)
+            hidden |= !isnothing(user_pubkey) && is_hidden(est, user_pubkey, :content, sender)
+            hidden |= is_hidden(est, receiver, :content, sender)
+        catch _
+            Utils.print_exceptions()
+        end
+        hidden && continue
+
         for pk in [sender, receiver]
-            (isnothing(pk) || ismissing(pk)) && continue
-            pk = Nostr.PubKeyId(pk)
             if !haskey(res_meta_data, pk) && pk in est.meta_data
                 res_meta_data[pk] = est.events[est.meta_data[pk]]
             end
         end
+
         zap_receipt_id = Nostr.EventId(zap_receipt_id)
         zap_receipt_id in est.events && push!(res, est.events[zap_receipt_id])
         if !ismissing(event_id)
             event_id = Nostr.EventId(event_id)
             event_id in est.events && push!(res, est.events[event_id])
         end
+
         push!(res, (; kind=Int(ZAP_EVENT), content=JSON.json((; 
                                                               event_id, 
                                                               created_at, 
