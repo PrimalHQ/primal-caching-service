@@ -351,7 +351,6 @@ function response_messages_for_posts(
     end
 
     for eid in eids
-        union!(res, event_zaps_by_satszapped(est; event_id=eid, limit=10))
         handle_event(eid) do subeid
             yield()
             time_exceeded() && return
@@ -1136,9 +1135,11 @@ function event_zaps_by_satszapped(
         est::DB.CacheStorage;
         event_id,
         limit::Int=20, since::Int=0, until=nothing, offset::Int=0,
+        user_pubkey=nothing,
     )
     limit <= 1000 || error("limit too big")
     event_id = cast(event_id, Nostr.EventId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
     isnothing(until) && (until = 1<<61)
     zaps = map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
@@ -1148,7 +1149,7 @@ function event_zaps_by_satszapped(
 
     zaps = first(sort(zaps, by=z->-z[6]), limit)
 
-    response_messages_for_zaps(est, zaps; order_by=:amount_sats)
+    response_messages_for_zaps(est, zaps; order_by=:amount_sats, user_pubkey)
 end
 
 function server_name(est::DB.CacheStorage)
