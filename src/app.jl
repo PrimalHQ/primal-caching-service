@@ -423,8 +423,10 @@ function feed(
                 if length(t.fields) >= 2 && t.fields[1] == "e" && !isnothing(local eid = try Nostr.EventId(t.fields[2]) catch _ end)
                     if eid in est.events 
                         e = est.events[eid]
-                        created_at = est.event_created_at[eid]
-                        push!(bms, (collect(eid.hash), created_at))
+                        if eid in est.event_created_at
+                            created_at = est.event_created_at[eid]
+                            push!(bms, (collect(eid.hash), created_at))
+                        end
                     end
                 end
             end
