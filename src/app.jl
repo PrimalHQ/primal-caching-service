@@ -308,8 +308,21 @@ function response_messages_for_posts(
 
         eid in est.events || return
         e = est.events[eid]
+
         is_hidden(est, user_pubkey, :content, e.pubkey) && return
         ext_is_hidden(est, e.pubkey) && return
+
+        e.kind == Int(Nostr.REPOST) && try 
+            hide = false
+            for t in e.tags
+                if t.fields[1] == "p"
+                    pk = Nostr.PubKeyId(t.fields[2])
+                    hide |= is_hidden(est, user_pubkey, :content, pk) || ext_is_hidden(est, pk) 
+                end
+            end
+            hide
+        catch _ false end && return
+
         push!(res, wrapfun(e))
         union!(res, event_stats(est, e.id))
         isnothing(user_pubkey) || union!(res, event_actions_cnt(est, e.id, user_pubkey))
