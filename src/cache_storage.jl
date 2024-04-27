@@ -568,11 +568,23 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkey
     end
     for m in eachmatch(re_mention, e.content)
         s = m.captures[1]
-        catch_exception(est, e, m) do
-            if !isnothing(local id = try Bech32.nip19_decode_wo_tlv(s) catch _ end)
-                id isa Nostr.PubKeyId || id isa Nostr.EventId || return
-                id isa Nostr.PubKeyId && !pubkeys_in_content && return
-                push!(mentiontags, Nostr.TagAny([id isa Nostr.PubKeyId ? "p" : "e", Nostr.hex(id)]))
+        if startswith(s, "naddr")
+            catch_exception(est, e, m) do
+                if !isnothing(local r = try Dict(Bech32.nip19_decode(s)) catch _ end)
+                    for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
+                                          @sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                                          (r[Bech32.Author], r[Bech32.Kind], r[Bech32.Special]))
+                        push!(mentiontags, Nostr.TagAny(["e", Nostr.hex(Nostr.EventId(eid))]))
+                    end
+                end
+            end
+        else
+            catch_exception(est, e, m) do
+                if !isnothing(local id = try Bech32.nip19_decode_wo_tlv(s) catch _ end)
+                    id isa Nostr.PubKeyId || id isa Nostr.EventId || return
+                    id isa Nostr.PubKeyId && !pubkeys_in_content && return
+                    push!(mentiontags, Nostr.TagAny([id isa Nostr.PubKeyId ? "p" : "e", Nostr.hex(id)]))
+                end
             end
         end
     end
@@ -1087,6 +1099,21 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
         end
     end
 
+    catch_exception(est, msg) do
+        if 10000 <= e.kind < 20000
+            for tag in e.tags
+                if length(tag.fields) >= 2 && tag.fields[1] == "d"
+                    identifier = tag.fields[2]
+                    lock(parameterized_replaceable_list_lock) do
+                        DB.exec(est.dyn[:parametrized_replaceable_events], @sql("delete from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3"), (e.pubkey, e.kind, identifier))
+                        DB.exec(est.dyn[:parametrized_replaceable_events], @sql("insert into parametrized_replaceable_events values (?1,?2,?3,?4,?5)"), (e.pubkey, e.kind, identifier, e.id, e.created_at))
+                    end
+                    break
+                end
+            end
+        end
+    end
+
     for (funcall,) in exe(est.event_hooks, @sql("select funcall from kv where event_id = ?1"), e.id)
         event_hook_execute(est, e, Tuple(JSON.parse(funcall)))
     end
@@ -1271,6 +1298,20 @@ function init(est::CacheStorage, running=Ref(true))
                                                                                         table="event_relay",
                                                                                         keycolumn="event_id",
                                                                                         valuecolumn="relay_url")
+##
+    est.dyn[:parametrized_replaceable_events] = DB.ShardedSqliteSet(Nostr.PubKeyId, "$(est.commons.directory)/db/parametrized_replaceable_events"; est.commons.dbargs...,
+                                                       table="parametrized_replaceable_events", 
+                                                       init_queries=["create table if not exists parametrized_replaceable_events (
+                                                                     pubkey blob not null,
+                                                                     kind integer not null,
+                                                                     identifier text not null,
+                                                                     event_id blob not null,
+                                                                     created_at integer not null
+                                                                     )",
+                                                                     "create index if not exists parametrized_replaceable_events_pubkey     on parametrized_replaceable_events (pubkey asc)",
+                                                                     "create index if not exists parametrized_replaceable_events_kind       on parametrized_replaceable_events (kind asc)",
+                                                                     "create index if not exists parametrized_replaceable_events_identifier on parametrized_replaceable_events (identifier asc)",
+                                                                     "create index if not exists parametrized_replaceable_events_created_at on parametrized_replaceable_events (created_at desc)"])
 ##
     est.periodic_task_running[] = true
     est.periodic_task[] = errormonitor(@async while est.periodic_task_running[]

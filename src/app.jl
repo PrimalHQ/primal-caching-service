@@ -29,6 +29,7 @@ exposed_functions = Set([:feed,
                          :mutelists,
                          :allowlist,
                          :parameterized_replaceable_list,
+                         :parametrized_replaceable_event,
                          :search_filterlist,
                          :import_events,
                          :zaps_feed,
@@ -931,37 +932,51 @@ function allowlist(est::DB.CacheStorage; pubkey, extended_response=true)
     response_messages_for_list(est, [est.allow_list], pubkey, extended_response)
 end
 
-function parameterized_replaceable_list(est::DB.CacheStorage; pubkey, identifier::String, extended_response=true)
-    pubkey = cast(pubkey, Nostr.PubKeyId)
-
+function parametrized_replaceable_events_extended_response(est::DB.CacheStorage, eids::Vector{Nostr.EventId})
     res = []
-    for (eid,) in DB.exe(est.parameterized_replaceable_list, DB.@sql("select event_id from parameterized_replaceable_list where pubkey = ?1 and identifier = ?2"), pubkey, identifier)
-        eid = Nostr.EventId(eid)
-        push!(res, est.events[eid])
-    end
-
-    if extended_response
-        res_meta_data = Dict()
-        for e in res
-            for tag in e.tags
-                if length(tag.fields) == 2 && tag.fields[1] == "p"
-                    if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-                        if !haskey(res_meta_data, pk) && pk in est.meta_data
-                            mdid = est.meta_data[pk]
-                            if mdid in est.events
-                                res_meta_data[pk] = est.events[mdid]
-                            end
+    res_meta_data = Dict()
+    for eid in eids
+        e = est.events[eid]
+        for tag in e.tags
+            if length(tag.fields) == 2 && tag.fields[1] == "p"
+                if !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
+                    if !haskey(res_meta_data, pk) && pk in est.meta_data
+                        mdid = est.meta_data[pk]
+                        if mdid in est.events
+                            res_meta_data[pk] = est.events[mdid]
                         end
                     end
                 end
             end
         end
-        res_meta_data = collect(values(res_meta_data))
-        append!(res, res_meta_data)
-        append!(res, user_scores(est, res_meta_data))
-        ext_user_infos(est, res, res_meta_data)
     end
+    res_meta_data = collect(values(res_meta_data))
+    append!(res, res_meta_data)
+    append!(res, user_scores(est, res_meta_data))
+    ext_user_infos(est, res, res_meta_data)
+    res
+end
 
+function parameterized_replaceable_list(est::DB.CacheStorage; pubkey, identifier::String, extended_response=true)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+
+    eids = [Nostr.EventId(eid) for (eid,) in DB.exe(est.parameterized_replaceable_list, 
+                                                    DB.@sql("select event_id from parameterized_replaceable_list where pubkey = ?1 and identifier = ?2"), 
+                                                    pubkey, identifier)]
+
+    res = [est.events[eid] for eid in eids]
+    extended_response && append!(res, parametrized_replaceable_events_extended_response(est, eids))
+    res
+end
+
+function parametrized_replaceable_event(est::DB.CacheStorage; pubkey, kind::Int, identifier::String, extended_response=true)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+
+    eids = [Nostr.EventId(eid) for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
+                                                     DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3"), 
+                                                     (pubkey, kind, identifier))]
+    res = [est.events[eid] for eid in eids]
+    extended_response && append!(res, parametrized_replaceable_events_extended_response(est, eids))
     res
 end
 
