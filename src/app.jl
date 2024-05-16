@@ -301,7 +301,7 @@ response_messages_for_posts_cache = Dict{Nostr.EventId, Any}() |> ThreadSafe
 response_messages_for_posts_res_meta_data_cache = Dict{Nostr.EventId, Any}() |> ThreadSafe
 response_messages_for_posts_mds_cache = Dict{Nostr.EventId, Any}() |> ThreadSafe
 
-ng_any_user = Ref(false)
+ng_any_user = Ref(true)
 ng_whitelist = Set{Nostr.PubKeyId}() |> ThreadSafe
 
 function response_messages_for_posts(
