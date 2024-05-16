@@ -2,12 +2,12 @@ for fn in [
            "utils.jl",
            "nostr.jl",
            "bech32.jl",
+           "perf_stats.jl",
            "fetching.jl",
            "db.jl",
            "metrics_logger.jl",
            "app.jl",
            "perf_test_redirection.jl",
-           "perf_stats.jl",
            "cache_server_handlers.jl",
            "cache_server.jl",
           ]

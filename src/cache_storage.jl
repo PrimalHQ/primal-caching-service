@@ -1,5 +1,6 @@
 #module DB
 
+import DataStructures
 using DataStructures: Accumulator, CircularBuffer, SortedDict, SortedSet
 using UnicodePlots: barplot
 using BenchmarkTools: prettytime

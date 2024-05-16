@@ -28,17 +28,17 @@ function get_stmt(conn::SQLiteConn, query::Int)
 end
 
 function exe(body::Function, conn::SQLiteConn, query::Int, args...)
-    PerfStats.record!(:sqlite_queries, query) do
+    # PerfStats.record!(:sqlite_queries, query) do
         stmt = get_stmt(conn, query)
         DBInterface.execute(body, stmt, args...)
-    end
+    # end
 end
 function exe(body::Function, db::SQLiteConn, query::String, args...)
-    dbname = split(db.dbs[1].file, '/')[end-1]
-    PerfStats.record!(:sqlite_queries, (dbname, query)) do
+    # dbname = split(db.dbs[1].file, '/')[end-1]
+    # PerfStats.record!(:sqlite_queries, (dbname, query)) do
         # DBInterface.execute(body, db.db, query, args...)
         DBInterface.execute(body, db.dbs[Threads.threadid()], query, args...)
-    end
+    # end
 end
 
 asvector(q::SQLite.Query) = map(collect, q)
