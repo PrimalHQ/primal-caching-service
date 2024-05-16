@@ -2,6 +2,8 @@
 
 import SQLite, DBInterface, JSON
 
+import ..PerfStats
+
 struct SQLiteConn <: DBConn
     dbs::Vector{SQLite.DB} # one DB connection per thread
     stmts::Vector{Union{Nothing, SQLite.Stmt}}
@@ -26,12 +28,17 @@ function get_stmt(conn::SQLiteConn, query::Int)
 end
 
 function exe(body::Function, conn::SQLiteConn, query::Int, args...)
-    stmt = get_stmt(conn, query)
-    DBInterface.execute(body, stmt, args...)
+    PerfStats.record!(:sqlite_queries, query) do
+        stmt = get_stmt(conn, query)
+        DBInterface.execute(body, stmt, args...)
+    end
 end
 function exe(body::Function, db::SQLiteConn, query::String, args...)
-    # DBInterface.execute(body, db.db, query, args...)
-    DBInterface.execute(body, db.dbs[Threads.threadid()], query, args...)
+    dbname = split(db.dbs[1].file, '/')[end-1]
+    PerfStats.record!(:sqlite_queries, (dbname, query)) do
+        # DBInterface.execute(body, db.db, query, args...)
+        DBInterface.execute(body, db.dbs[Threads.threadid()], query, args...)
+    end
 end
 
 asvector(q::SQLite.Query) = map(collect, q)

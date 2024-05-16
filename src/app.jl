@@ -2,13 +2,14 @@ module App
 
 import JSON
 using .Threads: @threads
-using DataStructures: OrderedSet, CircularBuffer
+using DataStructures: OrderedSet, CircularBuffer, Accumulator
+using ReadWriteLocks: read_lock
 import Sockets
 import Dates
 
 import ..DB
 import ..Nostr
-using ..Utils: ThreadSafe
+using ..Utils: ThreadSafe, Throttle
 
 exposed_functions = Set([:feed,
                          :thread_view,
@@ -291,7 +292,31 @@ end
 
 RELAY_URL_MAP = Dict{String, String}()
 
+import DataStructures
+posts_age_stats = Accumulator{Int, Int}() |> ThreadSafe
+post_stats = Accumulator{Nostr.EventId, Int}() |> ThreadSafe
+
+response_messages_for_posts_cache_periodic = Throttle(; period=300.0)
+response_messages_for_posts_cache = Dict{Nostr.EventId, Any}() |> ThreadSafe
+response_messages_for_posts_res_meta_data_cache = Dict{Nostr.EventId, Any}() |> ThreadSafe
+response_messages_for_posts_mds_cache = Dict{Nostr.EventId, Any}() |> ThreadSafe
+
+ng_any_user = Ref(false)
+ng_whitelist = Set{Nostr.PubKeyId}() |> ThreadSafe
+
 function response_messages_for_posts(
+        est::DB.CacheStorage, eids::Vector{Nostr.EventId}; 
+        res_meta_data=Dict(), user_pubkey=nothing,
+        time_exceeded=()->false,
+    )
+    if ng_any_user[] || user_pubkey in ng_whitelist
+        response_messages_for_posts_2(est, eids; res_meta_data, user_pubkey, time_exceeded)
+    else
+        response_messages_for_posts_1(est, eids; res_meta_data, user_pubkey, time_exceeded)
+    end
+end
+
+function response_messages_for_posts_1(
         est::DB.CacheStorage, eids::Vector{Nostr.EventId}; 
         res_meta_data=Dict(), user_pubkey=nothing,
         time_exceeded=()->false,
@@ -309,6 +334,13 @@ function response_messages_for_posts(
 
         eid in est.events || return
         e = est.events[eid]
+
+        lock(posts_age_stats) do posts_age_stats
+            posts_age_stats[trunc(Int, (time() - e.created_at)/24/3600)] += 1
+        end
+        lock(post_stats) do post_stats
+            post_stats[eid] += 1
+        end
 
         is_hidden(est, user_pubkey, :content, e.pubkey) && return
         ext_is_hidden(est, e.pubkey) && return
@@ -390,6 +422,146 @@ function response_messages_for_posts(
     res
 end
 
+function response_messages_for_posts_2(
+        est::DB.CacheStorage, eids::Vector{Nostr.EventId}; 
+        res_meta_data=Dict(), user_pubkey=nothing,
+        time_exceeded=()->false,
+    )
+    response_messages_for_posts_cache_periodic() do
+        empty!(response_messages_for_posts_cache)
+        empty!(response_messages_for_posts_res_meta_data_cache)
+        empty!(response_messages_for_posts_mds_cache)
+    end
+
+    function mkres()
+        (;
+         res = OrderedSet(),
+         pks = Set{Nostr.PubKeyId}(),
+         event_relays = Dict{Nostr.EventId, String}())
+    end
+
+    function handle_event(
+            body::Function, eid::Nostr.EventId; 
+            wrapfun::Function=identity, 
+            res=OrderedSet(), pks=Set{Nostr.PubKeyId}(), event_relays=Dict{Nostr.EventId, String}())
+        ext_is_hidden(est, eid) && return
+        eid in est.deleted_events && return
+
+        eid in est.events || return
+        e = est.events[eid]
+
+        lock(posts_age_stats) do posts_age_stats
+            posts_age_stats[trunc(Int, (time() - e.created_at)/24/3600)] += 1
+        end
+        lock(post_stats) do post_stats
+            post_stats[eid] += 1
+        end
+
+        is_hidden(est, user_pubkey, :content, e.pubkey) && return
+        ext_is_hidden(est, e.pubkey) && return
+
+        e.kind == Int(Nostr.REPOST) && try 
+            hide = false
+            for t in e.tags
+                if t.fields[1] == "p"
+                    pk = Nostr.PubKeyId(t.fields[2])
+                    hide |= is_hidden(est, user_pubkey, :content, pk) || ext_is_hidden(est, pk) 
+                end
+            end
+            hide
+        catch _ false end && return
+
+        push!(res, wrapfun(e))
+        union!(res, event_stats(est, e.id))
+        isnothing(user_pubkey) || union!(res, event_actions_cnt(est, e.id, user_pubkey))
+        push!(pks, e.pubkey)
+        union!(res, ext_event_response(est, e))
+        haskey(est.dyn[:event_relay], eid) && (event_relays[eid] = est.dyn[:event_relay][eid])
+
+        extra_tags = Nostr.Tag[]
+        DB.for_mentiones(est, e) do tag
+            push!(extra_tags, tag)
+        end
+        all_tags = vcat(e.tags, extra_tags)
+        # @show length(all_tags)
+        for tag in all_tags
+            tag = tag.fields
+            try
+                if length(tag) >= 2
+                    if tag[1] == "e"
+                        body(Nostr.EventId(tag[2]))
+                    elseif tag[1] == "p"
+                        push!(pks, Nostr.PubKeyId(tag[2]))
+                    end
+                end
+            catch _ end
+        end
+    end
+
+    r2 = mkres()
+
+    event_relays = r2.event_relays
+
+    # @time "eids" 
+    for eid in eids
+        r = get(response_messages_for_posts_cache, eid, nothing)
+
+        if isnothing(r)
+            r = mkres()
+
+            # @time "zaps"
+            union!(r.res, [e for e in event_zaps_by_satszapped(est; event_id=eid, limit=5, user_pubkey)
+                           if e.kind != Int(RANGE) && e.kind != Int(ZAP_EVENT)])
+
+            # @time "handle_event" 
+            handle_event(eid; r.res, r.pks, r.event_relays) do subeid
+                yield()
+                time_exceeded() && return
+                handle_event(subeid; wrapfun=e->(; kind=Int(REFERENCED_EVENT), content=JSON.json(e)), r.res, r.pks, r.event_relays) do subeid
+                    yield()
+                    time_exceeded() && return
+                    handle_event(subeid; wrapfun=e->(; kind=Int(REFERENCED_EVENT), content=JSON.json(e), r.res, r.pks, r.event_relays)) do _
+                    end
+                end
+            end
+            response_messages_for_posts_cache[eid] = r
+        end
+
+        union!(r2.res, r.res)
+        union!(r2.pks, r.pks)
+        event_relays = union(event_relays, r.event_relays)
+    end
+
+    res_meta_data = res_meta_data |> ThreadSafe
+    #@time "pks" 
+    for pk in r2.pks
+        if !haskey(res_meta_data, pk) && pk in est.meta_data
+            mdid = est.meta_data[pk]
+            res_meta_data[pk] = lock(response_messages_for_posts_res_meta_data_cache) do response_messages_for_posts_res_meta_data_cache
+                get!(response_messages_for_posts_res_meta_data_cache, mdid) do
+                    est.events[mdid]
+                end
+            end
+        end
+    end
+
+    !isempty(event_relays) && union!(r2.res, [(; kind=Int(EVENT_RELAYS), content=JSON.json(Dict([Nostr.hex(k)=>get(RELAY_URL_MAP, v, v) for (k, v) in event_relays])))])
+
+    res = collect(r2.res)
+
+    #@time "mds" 
+    for md in values(res_meta_data)
+        push!(res, md)
+        union!(res, lock(response_messages_for_posts_mds_cache) do response_messages_for_posts_mds_cache
+                   get!(response_messages_for_posts_mds_cache, md.id) do
+                       ext_event_response(est, md)
+                   end
+               end)
+    end
+
+    res
+end
+
 function feed(
         est::DB.CacheStorage;
         pubkey=nothing, notes::Union{Symbol,String}=:follows, include_replies=false,
@@ -401,6 +573,9 @@ function feed(
     notes = Symbol(notes)
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    tdur1 = tdur2 = 0
+    events_scanned = 0
 
     posts = [] |> ThreadSafe
     if pubkey isa Nothing
@@ -446,21 +621,62 @@ function feed(
         else;                      error("unsupported type of notes")
         end
         pubkeys = sort(pubkeys)
-        tdur = @elapsed @threads for p in pubkeys
-            time_exceeded() && break
-            yield()
-            append!(posts, map(Tuple, DB.exe(est.pubkey_events, DB.@sql("select event_id, created_at from kv 
-                                                                        where pubkey = ? and created_at >= ? and created_at <= ? and (is_reply = 0 or is_reply = ?)
-                                                                        order by created_at desc limit ? offset ?"),
-                                             p, since, until, Int(include_replies), limit, offset)))
+
+        use_slow_method = Ref(false)
+        if 1==1 && (ng_any_user[] || user_pubkey in ng_whitelist)
+            ca = 1
+            rwlock, ss = est.dyn[:recent_events]
+            lock(read_lock(rwlock)) do
+                if isempty(ss) || (let t = last(ss)[ca]; until < t; end)
+                    use_slow_method[] = true
+                else
+                    pubkeyss = Set(pubkeys)
+                    tdur1 = @elapsed begin
+                        try
+                            st1 = searchsortedfirst(ss, (until, until, false, Nostr.PubKeyId(zeros(UInt8, 32)), Nostr.EventId(zeros(UInt8, 32))))
+                            st2 = DataStructures.findkey(ss, last(ss))
+                            done = false
+                            for e in DataStructures.inclusive(ss, st1, st2)
+                                events_scanned += 1
+                                events_scanned >= 100000 && break
+                                if e[ca] < since; done = true; break; end
+                                !include_replies && e[3] && continue
+                                if e[4] in pubkeyss
+                                    push!(posts, (e[5].hash, e[ca]))
+                                    if length(posts) >= limit; done = true; break; end
+                                end
+                            end
+                            if !done; use_slow_method[] = true; end
+                        catch _ Utils.print_exceptions() end
+                        # @show (since, until, [until-p[2] for p in collect(posts)])
+                    end
+                end
+            end
         end
-        # @show (limit, length(pubkeys), tdur, Nostr.hex(pubkey))
+
+        if use_slow_method[]
+            tdur2 = @elapsed @threads for p in pubkeys
+            # tdur2 = @elapsed for p in pubkeys
+                time_exceeded() && break
+                yield()
+                length(posts) >= limit && break
+                append!(posts, map(Tuple, DB.exe(est.pubkey_events, DB.@sql("select event_id, created_at from kv 
+                                                                            where pubkey = ? and created_at >= ? and created_at <= ? and (is_reply = 0 or is_reply = ?)
+                                                                            order by created_at desc limit ? offset ?"),
+                                                 p, since, until, Int(include_replies), limit, offset)))
+            end
+        end
     end
 
     posts = sort(posts.wrapped, by=p->-p[2])[1:min(limit, length(posts))]
 
     eids = [Nostr.EventId(eid) for (eid, _) in posts]
-    res = response_messages_for_posts(est, eids; user_pubkey, time_exceeded)
+    tdur3 = @elapsed (res = response_messages_for_posts(est, eids; user_pubkey, time_exceeded))
+
+    if ng_any_user[] || user_pubkey in ng_whitelist
+        # println(:feed, " ", (; pubkey=Nostr.hex(pubkey), since, until, limit, pubkeys=length(pubkeys), events_scanned, tdur1, tdur2, tdur3, posts=length(posts), include_replies)) ##, ressize=length(JSON.json(res))))
+        push!(Main.stuff, (:feed_perf, (; limit, posts=length(posts), events_scanned, tdur1, tdur2, tdur3)))
+    end
 
     vcat(res, range(posts, :created_at))
 end
@@ -575,7 +791,27 @@ function is_user_following(est::DB.CacheStorage; pubkey, user_pubkey)
       content=JSON.json(user_pubkey in follows(est, pubkey)))]
 end
 
+import MbedTLS
+user_infos_cache_periodic = Throttle(; period=60.0)
+user_infos_cache = Dict{NTuple{20, UInt8}, Any}() |> ThreadSafe
+
 function user_infos(est::DB.CacheStorage; pubkeys::Vector)
+    user_infos_cache_periodic() do
+        empty!(user_infos_cache)
+    end
+    bio = IOBuffer()
+    for pk in pubkeys
+        write(bio, castmaybe(pk, Nostr.PubKeyId).pk)
+    end
+    k = NTuple{20, UInt8}(MbedTLS.digest(MbedTLS.MD_SHA1, take!(bio)))
+    lock(user_infos_cache) do user_infos_cache
+        get!(user_infos_cache, k) do
+            user_infos_1(est; pubkeys)
+        end
+    end
+end
+
+function user_infos_1(est::DB.CacheStorage; pubkeys::Vector)
     pubkeys = [pk isa Nostr.PubKeyId ? pk : Nostr.PubKeyId(pk) for pk in pubkeys]
 
     res_meta_data = Dict() |> ThreadSafe

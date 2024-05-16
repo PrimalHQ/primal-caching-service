@@ -1,10 +1,11 @@
 #module DB
 
-using DataStructures: Accumulator, CircularBuffer, SortedDict
+using DataStructures: Accumulator, CircularBuffer, SortedDict, SortedSet
 using UnicodePlots: barplot
 using BenchmarkTools: prettytime
 using Printf: @sprintf
 import StaticArrays
+using ReadWriteLocks: ReadWriteLock, ReadLock, WriteLock, read_lock, write_lock, lock!, unlock!
 
 using .Threads: @threads
 using Lazy: @forward
@@ -23,7 +24,7 @@ hashfunc(::Type{Nostr.EventId}) = eid->eid.hash[32]
 hashfunc(::Type{Nostr.PubKeyId}) = pk->pk.pk[32]
 hashfunc(::Type{Tuple{Nostr.PubKeyId, Nostr.EventId}}) = p->p[1].pk[32]
 
-MAX_MESSAGE_SIZE = Ref(100_000) |> ThreadSafe
+MAX_MESSAGE_SIZE = Ref(150_000) |> ThreadSafe
 kindints = [map(Int, collect(instances(Nostr.Kind))); [Nostr.BOOKMARKS]]
 
 term_lines = try parse(Int, strip(read(`tput lines`, String))) catch _ 15 end
@@ -779,7 +780,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
     end
 
     e isa Nostr.Event || return false
-    e.kind in kindints || return false
+    e.kind in kindints || (30000 <= e.kind < 40000) || return false
     est.verification_enabled && !verify(est, e) && return false
 
     should_import = lock(already_imported_check_lock) do
@@ -834,10 +835,22 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
         elseif e.kind == Int(Nostr.REPOST)
             is_pubkey_event = true
         end
-        is_pubkey_event && exe(est.pubkey_events, @sql("insert into kv (pubkey, event_id, created_at, is_reply) values (?1, ?2, ?3, ?4)"),
-                               e.pubkey, e.id, e.created_at, is_reply)
+        if is_pubkey_event
+            exe(est.pubkey_events, @sql("insert into kv (pubkey, event_id, created_at, is_reply) values (?1, ?2, ?3, ?4)"),
+                e.pubkey, e.id, e.created_at, is_reply)
+            try
+                re = est.dyn[:recent_events]
+                lock(write_lock(re.rwlock)) do
+                    push!(re.ss, (e.created_at, trunc(Int, time()), is_reply, e.pubkey, e.id))
+                    while length(re.ss) > re.capacity[]
+                        delete!(re.ss, last(re.ss))
+                    end
+                end
+            catch ex
+                println(ex)
+            end
+        end
     end
-
 
     incr(est, :tags; by=length(e.tags))
 
@@ -1100,7 +1113,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
     end
 
     catch_exception(est, msg) do
-        if 10000 <= e.kind < 20000
+        if 30000 <= e.kind < 40000
             for tag in e.tags
                 if length(tag.fields) >= 2 && tag.fields[1] == "d"
                     identifier = tag.fields[2]
@@ -1312,6 +1325,13 @@ function init(est::CacheStorage, running=Ref(true))
                                                                      "create index if not exists parametrized_replaceable_events_kind       on parametrized_replaceable_events (kind asc)",
                                                                      "create index if not exists parametrized_replaceable_events_identifier on parametrized_replaceable_events (identifier asc)",
                                                                      "create index if not exists parametrized_replaceable_events_created_at on parametrized_replaceable_events (created_at desc)"])
+##
+    let l = ReentrantLock()
+        est.dyn[:recent_events] = (; 
+                                   rwlock   = ReadWriteLock(0, false, l, Threads.Condition(l)),
+                                   ss       = SortedSet{Tuple{Int, Int, Bool, Nostr.PubKeyId, Nostr.EventId}}(DataStructures.Reverse),
+                                   capacity = Ref(3_000_000))
+    end
 ##
     est.periodic_task_running[] = true
     est.periodic_task[] = errormonitor(@async while est.periodic_task_running[]
@@ -1531,6 +1551,31 @@ function update_pubkey_ln_address(est::CacheStorage, pubkey::Nostr.PubKeyId)
     d = JSON.parse(est.events[eid].content)
     lud16 = get(d, "lud16", nothing)
     !isnothing(lud16) && (est.dyn[:pubkey_ln_address][pubkey] = lud16)
+end
+
+function Base.lock(body::Function, l::Union{ReadLock, WriteLock})
+    lock!(l)
+    try
+        body()
+    finally
+        unlock!(l)
+    end
+end
+
+function recent_events_init(est::CacheStorage; days=2, running=Utils.PressEnterToStop())
+    rs = DB.exec(est.pubkey_events, "select pubkey, event_id, created_at, is_reply from kv where created_at>=?1 order by created_at desc", (trunc(Int,time()-days*24*3600),))
+    re = est.dyn[:recent_events]
+    lock(write_lock(re.rwlock)) do
+        empty!(re.ss)
+        for (i, r) in enumerate(rs)
+            yield()
+            running[] || break
+            print("recent_events_init: $i / $(length(rs))\r")
+            pk, eid, created_at, is_reply = Nostr.PubKeyId(r[1]), Nostr.EventId(r[2]), r[3], r[4]
+            push!(re.ss, (created_at, created_at, is_reply, pk, eid))
+        end
+    end
+    length(rs)
 end
 
 function ext_preimport_check(est::CacheStorage, e) true end

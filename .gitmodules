@@ -4,3 +4,6 @@
 [submodule "dev/HTTP.jl"]
 	path = dev/HTTP.jl
 	url = https://github.com/PrimalHQ/HTTP.jl
+[submodule "dev/ReadWriteLocks.jl"]
+	path = dev/ReadWriteLocks.jl
+	url = https://github.com/PrimalHQ/ReadWriteLocks.jl

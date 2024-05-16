@@ -10,6 +10,7 @@ using ..Utils: ThreadSafe, Throttle
 import ..Nostr
 import ..MetricsLogger
 import ..PerfTestRedirection
+import ..PerfStats
 
 PRINT_EXCEPTIONS = Ref(false)
 
@@ -155,7 +156,11 @@ function initial_filter_handler(conn::Conn, subid, filters)
                 funcall = Symbol(filt[1])
                 if funcall in App().exposed_functions
                     kwargs = Pair{Symbol, Any}[Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
-                    app_funcall(funcall, kwargs, sendres; subid, ws_id=ws_id)
+
+                    Main.PerfStats.record!(:funcalls, funcall) do
+                        app_funcall(funcall, kwargs, sendres; subid, ws_id=ws_id)
+                    end
+
                 elseif funcall in App().exposed_async_functions
                     sendres([])
                 else
