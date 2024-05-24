@@ -14,6 +14,8 @@ import ..PerfStats
 
 PRINT_EXCEPTIONS = Ref(false)
 
+MAX_SUBSCRIPTIONS = Ref(200)
+
 Tsubid = String
 Tfilters = Vector{Any}
 struct Conn
@@ -54,6 +56,15 @@ function on_client_message(ws, msg)
             subid = d[2]
             filters = d[3:end]
             conn.subs[subid] = filters
+
+            if length(conn.subs) > MAX_SUBSCRIPTIONS[]
+                send(ws, JSON.json(["NOTICE", subid, "too many subscriptions"]))
+                close(ws)
+            end
+            if any([haskey(f, "kinds") || haskey(f, "authors") for f in filters])
+                send(ws, JSON.json(["NOTICE", subid, "kinds or authors filter is not supported"]))
+                close(ws)
+            end
 
             PerfTestRedirection.enabled() && for filt in filters
                 if haskey(filt, "cache")
@@ -260,22 +271,7 @@ function netstats_start()
     netstats_task[] = 
     errormonitor(@async while netstats_running[]
                      try
-                         d = Base.invokelatest(App().network_stats, est())
-                         broadcast_network_stats(d)
-
-                         periodic_log_stats() do
-                             lock(est().commons.stats) do cache_storage_stats
-                                 MetricsLogger.log((; t=time(), cache_storage_stats))
-                             end
-                         end
-
-                         periodic_directmsg_counts() do
-                             MetricsLogger.log(r->(; funcall=:broadcast_directmsg_count)) do
-                                 broadcast_directmsg_count()
-                             end
-                         end
-
-                         ext_periodic()
+                         Base.invokelatest(netstats_handler)
                      catch ex
                          push!(exceptions, (:netstats, ex))
                      end
@@ -288,6 +284,25 @@ function netstats_stop()
     netstats_running[] = false
     wait(netstats_task[])
     netstats_task[] = nothing
+end
+
+function netstats_handler()
+    d = App().network_stats(est())
+    broadcast_network_stats(d)
+
+    periodic_log_stats() do
+        lock(est().commons.stats) do cache_storage_stats
+            MetricsLogger.log((; t=time(), cache_storage_stats))
+        end
+    end
+
+    periodic_directmsg_counts() do
+        MetricsLogger.log(r->(; funcall=:broadcast_directmsg_count)) do
+            broadcast_directmsg_count()
+        end
+    end
+
+    ext_periodic()
 end
 
 function broadcast_directmsg_count()

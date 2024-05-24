@@ -1579,6 +1579,75 @@ function recent_events_init(est::CacheStorage; days=2, running=Utils.PressEnterT
     length(rs)
 end
 
+function import_messages(est::CacheStorage, filename::String; pos=0, cond=e->true, running=Utils.PressEnterToStop())
+    total = Ref(0)
+    imported = Ref(0)
+    condcnt = Ref(0)
+    kindstats = Accumulator{Int, Int}()
+    open(filename) do f
+        if pos != 0
+            seek(f, pos)
+            readline()
+        end
+        while !eof(f)
+            running[] || break
+            yield()
+            msg = readline(f)
+            try
+                d = JSON.parse(msg)
+                if d[3][1] == "EVENT"
+                    e = Nostr.Event(d[3][3])
+                    kindstats[e.kind] += 1
+                    if cond(e)
+                        condcnt[] += 1
+                        import_msg_into_storage(msg, est) && (imported[] += 1)
+                    end
+                end
+            catch ex
+                println(ex)
+            end
+            total[] += 1
+            if total[] % 1000 == 0
+                print("total: $(total[])  cond: $(condcnt[])  imported: $(imported[])\r")
+            end
+        end
+    end
+    (; total=total[], cond=condcnt[], imported=imported[], kindstats)
+end
+
+function iterate_events_in_file(body::Function, filename::String; pos=0, cond=e->true, running=Utils.PressEnterToStop())
+    total = Ref(0)
+    condcnt = Ref(0)
+    open(filename) do f
+        if pos != 0
+            seek(f, pos)
+            readline()
+        end
+        while !eof(f)
+            running[] || break
+            yield()
+            msg = readline(f)
+            try
+                d = JSON.parse(msg)
+                if d[3][1] == "EVENT"
+                    e = Nostr.Event(d[3][3])
+                    if cond(e)
+                        condcnt[] += 1
+                        body(e) == :stop && break
+                    end
+                end
+                total[] += 1
+                if total[] % 1000 == 0
+                    print("total: $(total[])  cond: $(condcnt[])\r")
+                end
+            catch ex
+                println(ex)
+            end
+        end
+    end
+    nothing
+end
+
 function ext_preimport_check(est::CacheStorage, e) true end
 function ext_pubkey(est::CacheStorage, e) end
 function ext_preimport(est::CacheStorage, e) end
