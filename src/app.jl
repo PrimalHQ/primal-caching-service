@@ -509,14 +509,14 @@ function response_messages_for_posts_2(
 
     event_relays = r2.event_relays
 
-    # @time "eids" 
+    # @time "eids"
     for eid in eids
         r = get(response_messages_for_posts_cache, (eid, user_pubkey), nothing)
 
         if isnothing(r)
             r = mkres()
 
-            # @time "zaps"
+            # @time "zaps" 
             union!(r.res, [e for e in event_zaps_by_satszapped(est; event_id=eid, limit=5, user_pubkey)
                            if e.kind != Int(RANGE)])
 
@@ -540,7 +540,7 @@ function response_messages_for_posts_2(
     end
 
     res_meta_data = res_meta_data |> ThreadSafe
-    #@time "pks" 
+    # @time "pks" 
     for pk in r2.pks
         if !haskey(res_meta_data, pk) && pk in est.meta_data
             mdid = est.meta_data[pk]
@@ -556,10 +556,10 @@ function response_messages_for_posts_2(
 
     res = collect(r2.res)
 
-    #@time "mds" 
+    # @time "mds"
     for md in values(res_meta_data)
         push!(res, md)
-        union!(res, lock(response_messages_for_posts_mds_cache) do response_messages_for_posts_mds_cache
+        append!(res, lock(response_messages_for_posts_mds_cache) do response_messages_for_posts_mds_cache
                    get!(response_messages_for_posts_mds_cache, md.id) do
                        ext_event_response(est, md)
                    end
