@@ -839,7 +839,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
         if is_pubkey_event
             exe(est.pubkey_events, @sql("insert into kv (pubkey, event_id, created_at, is_reply) values (?1, ?2, ?3, ?4)"),
                 e.pubkey, e.id, e.created_at, is_reply)
-            try
+            catch_exception(est, :import_recent_events) do
                 re = est.dyn[:recent_events]
                 lock(write_lock(re.rwlock)) do
                     push!(re.ss, (e.created_at, trunc(Int, time()), is_reply, e.pubkey, e.id))
@@ -847,24 +847,22 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
                         delete!(re.ss, last(re.ss))
                     end
                 end
-            catch ex
-                println(ex)
             end
         end
     end
 
     incr(est, :tags; by=length(e.tags))
 
-    disable_daily_stats || catch_exception(est, msg) do
-        lock(est.commons.stats) do _
-            d = string(Dates.Date(Dates.now()))
-            if !dyn_exists(est, :daily_stats, :human_event, d, e.pubkey)
-                dyn_insert(est, :daily_stats, :human_event, d, e.pubkey)
-                dyn_inc(est, :daily_stats, :active_users, d)
-                ext_is_human(est, e.pubkey) && dyn_inc(est, :daily_stats, :active_humans, d)
-            end
-        end
-    end
+    # disable_daily_stats || catch_exception(est, msg) do
+    #     lock(est.commons.stats) do _
+    #         d = string(Dates.Date(Dates.now()))
+    #         if !dyn_exists(est, :daily_stats, :human_event, d, e.pubkey)
+    #             dyn_insert(est, :daily_stats, :human_event, d, e.pubkey)
+    #             dyn_inc(est, :daily_stats, :active_users, d)
+    #             ext_is_human(est, e.pubkey) && dyn_inc(est, :daily_stats, :active_humans, d)
+    #         end
+    #     end
+    # end
 
     catch_exception(est, msg) do
         if     e.kind == Int(Nostr.SET_METADATA)
@@ -1110,6 +1108,8 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
             if !haskey(est.dyn[:bookmarks], e.pubkey) || est.events[est.dyn[:bookmarks][e.pubkey]].created_at < e.created_at
                 est.dyn[:bookmarks][e.pubkey] = e.id
             end
+        elseif e.kind == Int(Nostr.LONG_FORM_CONTENT)
+            ext_text_note(est, e)
         end
     end
 

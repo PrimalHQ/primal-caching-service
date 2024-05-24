@@ -43,6 +43,8 @@ exposed_functions = Set([:feed,
                          :user_of_ln_address,
                          :get_user_relays,
                          :get_bookmarks,
+                         :long_form_content_feed,
+                         :long_form_content_thread_view,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -71,6 +73,7 @@ IS_HIDDEN_BY_CONTENT_MODERATION=10_000_137
 USER_PUBKEY=10_000_138
 USER_RELAYS=10_000_139
 EVENT_RELAYS=10_000_141
+LONG_FORM_METADATA=10_000_144
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
@@ -297,7 +300,7 @@ posts_age_stats = Accumulator{Int, Int}() |> ThreadSafe
 post_stats = Accumulator{Nostr.EventId, Int}() |> ThreadSafe
 
 response_messages_for_posts_cache_periodic = Throttle(; period=300.0)
-response_messages_for_posts_cache = Dict{Nostr.EventId, Any}() |> ThreadSafe
+response_messages_for_posts_cache = Dict{Tuple{Nostr.EventId, Union{Nothing, Nostr.PubKeyId}}, Any}() |> ThreadSafe
 response_messages_for_posts_res_meta_data_cache = Dict{Nostr.EventId, Any}() |> ThreadSafe
 response_messages_for_posts_mds_cache = Dict{Nostr.EventId, Any}() |> ThreadSafe
 
@@ -471,6 +474,10 @@ function response_messages_for_posts_2(
             hide
         catch _ false end && return
 
+        if e.kind == Int(Nostr.LONG_FORM_CONTENT)
+            union!(res, [(; kind=Int(LONG_FORM_METADATA), content=JSON.json((; event_id=e.id, words=length(split(e.content)))))])
+        end
+
         push!(res, wrapfun(e))
         union!(res, event_stats(est, e.id))
         isnothing(user_pubkey) || union!(res, event_actions_cnt(est, e.id, user_pubkey))
@@ -504,14 +511,14 @@ function response_messages_for_posts_2(
 
     # @time "eids" 
     for eid in eids
-        r = get(response_messages_for_posts_cache, eid, nothing)
+        r = get(response_messages_for_posts_cache, (eid, user_pubkey), nothing)
 
         if isnothing(r)
             r = mkres()
 
             # @time "zaps"
             union!(r.res, [e for e in event_zaps_by_satszapped(est; event_id=eid, limit=5, user_pubkey)
-                           if e.kind != Int(RANGE) && e.kind != Int(ZAP_EVENT)])
+                           if e.kind != Int(RANGE)])
 
             # @time "handle_event" 
             handle_event(eid; r.res, r.pks, r.event_relays) do subeid
@@ -524,7 +531,7 @@ function response_messages_for_posts_2(
                     end
                 end
             end
-            response_messages_for_posts_cache[eid] = r
+            response_messages_for_posts_cache[(eid, user_pubkey)] = r
         end
 
         union!(r2.res, r.res)
@@ -646,6 +653,7 @@ function feed(
                                     if length(posts) >= limit; done = true; break; end
                                 end
                             end
+                            # @show (done, since, until)
                             if !done; use_slow_method[] = true; end
                         catch _ Utils.print_exceptions() end
                         # @show (since, until, [until-p[2] for p in collect(posts)])
@@ -796,6 +804,8 @@ user_infos_cache_periodic = Throttle(; period=60.0)
 user_infos_cache = Dict{NTuple{20, UInt8}, Any}() |> ThreadSafe
 
 function user_infos(est::DB.CacheStorage; pubkeys::Vector)
+    return user_infos_1(est; pubkeys)
+
     user_infos_cache_periodic() do
         empty!(user_infos_cache)
     end
@@ -816,6 +826,7 @@ function user_infos_1(est::DB.CacheStorage; pubkeys::Vector)
 
     res_meta_data = Dict() |> ThreadSafe
     @threads for pk in pubkeys 
+    # for pk in pubkeys 
         if pk in est.meta_data
             eid = est.meta_data[pk]
             eid in est.events && (res_meta_data[pk] = est.events[eid])
@@ -897,6 +908,7 @@ function events(
     elseif !extended_response
         res = [] |> ThreadSafe
         @threads for eid in event_ids 
+        # for eid in event_ids 
             eid in est.events && push!(res, est.events[eid])
         end
         sort(res.wrapped; by=e->e.created_at)
@@ -1334,6 +1346,7 @@ function zaps_feed(
 
     zaps = [] |> ThreadSafe
     @threads for p in pks
+    # for p in pks
         time_exceeded() && break
         append!(zaps, map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
                                                                    where (sender = ? or receiver = ?) and created_at >= ? and created_at <= ?
@@ -1503,6 +1516,52 @@ function get_bookmarks(est::DB.CacheStorage; pubkey)
         end
     end
     res
+end
+
+function long_form_content_feed(
+        est::DB.CacheStorage;
+        pubkey=nothing, notes::Union{Symbol,String}=:follows,
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+        user_pubkey=nothing,
+        time_exceeded=()->false,
+    )
+    limit <= 1000 || error("limit too big")
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    posts = [] |> ThreadSafe
+    if pubkey isa Nothing
+        
+    else
+        pubkeys = 
+        if     notes == :follows;  follows(est, pubkey)
+        elseif notes == :authored; [pubkey]
+        else;                      error("unsupported type of notes")
+        end
+        pubkeys = sort(pubkeys)
+
+        @threads for p in pubkeys
+            time_exceeded() && break
+            length(posts) >= limit && break
+            append!(posts, map(Tuple, DB.exec(est.dyn[:parametrized_replaceable_events], 
+                                              DB.@sql("select event_id, created_at from parametrized_replaceable_events 
+                                                      where kind = 30023 and pubkey = ? and created_at >= ? and created_at <= ?
+                                                      order by created_at desc limit ? offset ?"),
+                                              (p, since, until, limit, offset))))
+        end
+    end
+
+    posts = first(sort(posts.wrapped, by=p->-p[2]), limit)
+
+    eids = [Nostr.EventId(eid) for (eid, _) in posts]
+    res = response_messages_for_posts_2(est, eids; user_pubkey, time_exceeded)
+
+    vcat(res, range(posts, :created_at))
+end
+
+function long_form_content_thread_view(est::DB.CacheStorage; pubkey, kind::Int, identifier::String, kwargs...)
+    event_id = parametrized_replaceable_event(est; pubkey, kind, identifier, extended_response=false)[1].id
+    thread_view(est; event_id, kwargs...)
 end
 
 function ext_user_infos(est::DB.CacheStorage, res, res_meta_data) end

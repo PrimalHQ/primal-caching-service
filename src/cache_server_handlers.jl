@@ -128,13 +128,21 @@ function app_funcall(funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol,
                           (; funcall, kwargs, ws=string(ws_id), subid)
                       end) do
     fetch(Threads.@spawn with_time_limit() do time_exceeded
+              Base.current_task().sticky = true
+
               funcall in [:feed, :get_notifications] && push!(kwargs, :time_exceeded=>time_exceeded)
               res = []
-              append!(res, Base.invokelatest(getproperty(App(), funcall), est(); kwargs..., kwargs_extra...))
-              if time_exceeded()
-                  # @show (:time_exceeded, Dates.now(), funcall)
-                  push!(res, (; kind=App().PARTIAL_RESPONSE))
+
+              Main.PerfStats.record!(:funcalls, funcall) do
+                  # Main.PerfStats.record!(:funcalls2, (funcall, kwargs)) do
+                      append!(res, Base.invokelatest(getproperty(App(), funcall), est(); kwargs..., kwargs_extra...))
+                      if time_exceeded()
+                          # @show (:time_exceeded, Dates.now(), funcall)
+                          push!(res, (; kind=App().PARTIAL_RESPONSE))
+                      end
+                  # end
               end
+
               res
           end)
     end |> sendres
@@ -167,11 +175,7 @@ function initial_filter_handler(conn::Conn, subid, filters)
                 funcall = Symbol(filt[1])
                 if funcall in App().exposed_functions
                     kwargs = Pair{Symbol, Any}[Symbol(k)=>v for (k, v) in get(filt, 2, Dict())]
-
-                    Main.PerfStats.record!(:funcalls, funcall) do
-                        app_funcall(funcall, kwargs, sendres; subid, ws_id=ws_id)
-                    end
-
+                    app_funcall(funcall, kwargs, sendres; subid, ws_id=ws_id)
                 elseif funcall in App().exposed_async_functions
                     sendres([])
                 else

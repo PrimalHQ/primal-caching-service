@@ -2,6 +2,7 @@ for fn in [
            "utils.jl",
            "nostr.jl",
            "bech32.jl",
+           "clocks.jl",
            "perf_stats.jl",
            "fetching.jl",
            "db.jl",
