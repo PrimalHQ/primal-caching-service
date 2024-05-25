@@ -666,7 +666,6 @@ function feed(
             # tdur2 = @elapsed for p in pubkeys
                 time_exceeded() && break
                 yield()
-                length(posts) >= limit && break
                 append!(posts, map(Tuple, DB.exe(est.pubkey_events, DB.@sql("select event_id, created_at from kv 
                                                                             where pubkey = ? and created_at >= ? and created_at <= ? and (is_reply = 0 or is_reply = ?)
                                                                             order by created_at desc limit ? offset ?"),
@@ -675,15 +674,15 @@ function feed(
         end
     end
 
-    posts = sort(posts.wrapped, by=p->-p[2])[1:min(limit, length(posts))]
+    posts = first(sort(posts.wrapped, by=p->-p[2]), limit)
 
     eids = [Nostr.EventId(eid) for (eid, _) in posts]
     tdur3 = @elapsed (res = response_messages_for_posts(est, eids; user_pubkey, time_exceeded))
 
-    if ng_any_user[] || user_pubkey in ng_whitelist
-        # println(:feed, " ", (; pubkey=Nostr.hex(pubkey), since, until, limit, pubkeys=length(pubkeys), events_scanned, tdur1, tdur2, tdur3, posts=length(posts), include_replies)) ##, ressize=length(JSON.json(res))))
-        push!(Main.stuff, (:feed_perf, (; limit, posts=length(posts), events_scanned, tdur1, tdur2, tdur3)))
-    end
+    # if ng_any_user[] || user_pubkey in ng_whitelist
+    #     # println(:feed, " ", (; pubkey=Nostr.hex(pubkey), since, until, limit, pubkeys=length(pubkeys), events_scanned, tdur1, tdur2, tdur3, posts=length(posts), include_replies)) ##, ressize=length(JSON.json(res))))
+    #     push!(Main.stuff, (:feed_perf, (; limit, posts=length(posts), events_scanned, tdur1, tdur2, tdur3)))
+    # end
 
     vcat(res, range(posts, :created_at))
 end
