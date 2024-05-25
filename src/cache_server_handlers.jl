@@ -60,10 +60,12 @@ function on_client_message(ws, msg)
             if length(conn.subs) > MAX_SUBSCRIPTIONS[]
                 send(ws, JSON.json(["NOTICE", subid, "too many subscriptions"]))
                 close(ws)
+                return
             end
             if any([haskey(f, "kinds") || haskey(f, "authors") for f in filters])
                 send(ws, JSON.json(["NOTICE", subid, "kinds or authors filter is not supported"]))
                 close(ws)
+                return
             end
 
             PerfTestRedirection.enabled() && for filt in filters
