@@ -719,7 +719,7 @@ function thread_view_replies(est::DB.CacheStorage;
                                      event_id, since, until, limit, offset)
         push!(posts, (Nostr.EventId(reid), created_at))
     end
-    posts = sort(posts, by=p->-p[2])[1:min(limit, length(posts))]
+    posts = first(sort(posts, by=p->-p[2]), limit)
     
     reids = [reid for (reid, _) in posts]
     [response_messages_for_posts(est, reids; user_pubkey); range(posts, :created_at)]
@@ -1395,7 +1395,7 @@ function user_zaps_by_satszapped(
     limit <= 1000 || error("limit too big")
     receiver = cast(receiver, Nostr.PubKeyId)
 
-    isnothing(until) && (until = 1<<61)
+    isnothing(until) && (until = 100_000_000_000)
     zaps = map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
                                                         where receiver = ? and amount_sats >= ? and amount_sats <= ?
                                                         order by amount_sats desc limit ? offset ?"),
@@ -1416,7 +1416,7 @@ function event_zaps_by_satszapped(
     event_id = cast(event_id, Nostr.EventId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
-    isnothing(until) && (until = 1<<61)
+    isnothing(until) && (until = 100_000_000_000)
     zaps = map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
                                                         where event_id = ? and amount_sats >= ? and amount_sats <= ?
                                                         order by amount_sats desc limit ? offset ?"),
@@ -1540,7 +1540,6 @@ function long_form_content_feed(
 
         @threads for p in pubkeys
             time_exceeded() && break
-            length(posts) >= limit && break
             append!(posts, map(Tuple, DB.exec(est.dyn[:parametrized_replaceable_events], 
                                               DB.@sql("select event_id, created_at from parametrized_replaceable_events 
                                                       where kind = 30023 and pubkey = ? and created_at >= ? and created_at <= ?
