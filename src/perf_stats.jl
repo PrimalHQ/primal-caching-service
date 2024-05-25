@@ -62,7 +62,7 @@ function record!(body::Function, d::Symbol, key)
                     maxcpuusage=max(r.maxcpuusage, cpuusage))
     end
 
-    t.time > 1 && println((string(Dates.now()), t.time, key))
+    # t.time > 1 && println((string(Dates.now()), t.time, key))
 
     t.value
 end
