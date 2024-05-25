@@ -485,6 +485,9 @@ function response_messages_for_posts_2(
         union!(res, ext_event_response(est, e))
         haskey(est.dyn[:event_relay], eid) && (event_relays[eid] = est.dyn[:event_relay][eid])
 
+        union!(res, [e for e in event_zaps_by_satszapped(est; event_id=eid, limit=5, user_pubkey)
+                     if e.kind != Int(RANGE)])
+
         extra_tags = Nostr.Tag[]
         DB.for_mentiones(est, e) do tag
             push!(extra_tags, tag)
@@ -515,10 +518,6 @@ function response_messages_for_posts_2(
 
         if isnothing(r)
             r = mkres()
-
-            # @time "zaps" 
-            union!(r.res, [e for e in event_zaps_by_satszapped(est; event_id=eid, limit=5, user_pubkey)
-                           if e.kind != Int(RANGE)])
 
             # @time "handle_event" 
             handle_event(eid; r.res, r.pks, r.event_relays) do subeid
@@ -554,19 +553,19 @@ function response_messages_for_posts_2(
 
     !isempty(event_relays) && union!(r2.res, [(; kind=Int(EVENT_RELAYS), content=JSON.json(Dict([Nostr.hex(k)=>get(RELAY_URL_MAP, v, v) for (k, v) in event_relays])))])
 
-    res = collect(r2.res)
+    res = copy(r2.res)
 
-    # @time "mds"
+    #@time "mds" 
     for md in values(res_meta_data)
         push!(res, md)
-        append!(res, lock(response_messages_for_posts_mds_cache) do response_messages_for_posts_mds_cache
+        union!(res, lock(response_messages_for_posts_mds_cache) do response_messages_for_posts_mds_cache
                    get!(response_messages_for_posts_mds_cache, md.id) do
                        ext_event_response(est, md)
                    end
                end)
     end
 
-    res
+    collect(res)
 end
 
 function feed(
