@@ -865,6 +865,17 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
     # end
 
     catch_exception(est, msg) do
+        if e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.LONG_FORM_CONTENT)
+            for (tbl, q, key_vals) in [(est.event_stats,           event_stats_insert_q,           (e.id,     e.pubkey)),
+                                       (est.event_stats_by_pubkey, event_stats_by_pubkey_insert_q, (e.pubkey,     e.id))]
+                args = [key_vals..., e.created_at]
+                append!(args, [0 for _ in 1:(event_stats_fields_cnt-length(args))])
+                exe(tbl, q, args...)
+            end
+        end
+    end
+
+    catch_exception(est, msg) do
         if     e.kind == Int(Nostr.SET_METADATA)
             track_user_stats(est, e.pubkey) do
                 k = e.pubkey
@@ -942,13 +953,6 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
             incr(est, :pubnotes)
 
             ext_text_note(est, e)
-
-            for (tbl, q, key_vals) in [(est.event_stats,           event_stats_insert_q,           (e.id,     e.pubkey)),
-                                       (est.event_stats_by_pubkey, event_stats_by_pubkey_insert_q, (e.pubkey,     e.id))]
-                args = [key_vals..., e.created_at]
-                append!(args, [0 for _ in 1:(event_stats_fields_cnt-length(args))])
-                exe(tbl, q, args...)
-            end
 
             parent_eid = nothing
             for tag in e.tags
@@ -1119,6 +1123,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
                 if length(tag.fields) >= 2 && tag.fields[1] == "d"
                     identifier = tag.fields[2]
                     lock(parameterized_replaceable_list_lock) do
+                        # TODO check created_at
                         DB.exec(est.dyn[:parametrized_replaceable_events], @sql("delete from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3"), (e.pubkey, e.kind, identifier))
                         DB.exec(est.dyn[:parametrized_replaceable_events], @sql("insert into parametrized_replaceable_events values (?1,?2,?3,?4,?5)"), (e.pubkey, e.kind, identifier, e.id, e.created_at))
                     end
