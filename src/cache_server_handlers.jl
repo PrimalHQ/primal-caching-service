@@ -130,7 +130,7 @@ function app_funcall(funcall::Symbol, kwargs, sendres; kwargs_extra=Pair{Symbol,
                           (; funcall, kwargs, ws=string(ws_id), subid)
                       end) do
     fetch(Threads.@spawn with_time_limit() do time_exceeded
-              Base.current_task().sticky = true
+              # Base.current_task().sticky = true
 
               funcall in [:feed, :get_notifications] && push!(kwargs, :time_exceeded=>time_exceeded)
               res = []
