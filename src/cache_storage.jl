@@ -553,7 +553,14 @@ re_hashref = r"\#\[([0-9]*)\]"
 re_mention = r"\bnostr:((note|npub|naddr|nevent|nprofile)1\w+)\b"
 
 function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkeys_in_content=true)
-    e.kind == Int(Nostr.TEXT_NOTE) || return
+    content =
+    if     e.kind == Int(Nostr.TEXT_NOTE) || e.kind == Int(Nostr.LONG_FORM_CONTENT)
+        e.content
+    elseif e.kind == Int(Nostr.REPOST)
+        try JSON.parse(e.content)["content"] catch _ return end
+    else
+        return
+    end
     mentiontags = Set()
     for m in eachmatch(re_hashref, e.content)
         ref = 1 + try parse(Int, m.captures[1]) catch _ continue end
@@ -562,22 +569,29 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkey
         length(tag.fields) >= 2 || continue
         push!(mentiontags, tag)
     end
+    function push_parametrized_replaceable_event(pubkey, kind, identifier)
+        for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
+                              @sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                              (pubkey, kind, identifier))
+            push!(mentiontags, Nostr.TagAny(["e", Nostr.hex(Nostr.EventId(eid))]))
+        end
+    end
     for tag in e.tags
-        length(tag.fields) >= 4 && tag.fields[4] == "mention" && push!(mentiontags, tag)
-        # if length(tag.fields) >= 2 && tag.fields[1] == "p" && !isnothing(local pk = try Nostr.PubKeyId(tag.fields[2]) catch _ end)
-        #     push!(mentiontags, tag)
-        # end
+        if length(tag.fields) >= 4 && tag.fields[4] == "mention"
+            if tag.fields[1] == "a"
+                ps = split(tag.fields[2], ':')
+                push_parametrized_replaceable_event(Nostr.PubKeyId(string(ps[2])), parse(Int, ps[1]), string(ps[3]))
+            else
+                push!(mentiontags, tag)
+            end
+        end
     end
     for m in eachmatch(re_mention, e.content)
         s = m.captures[1]
         if startswith(s, "naddr")
             catch_exception(est, e, m) do
                 if !isnothing(local r = try Dict(Bech32.nip19_decode(s)) catch _ end)
-                    for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
-                                          @sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
-                                          (r[Bech32.Author], r[Bech32.Kind], r[Bech32.Special]))
-                        push!(mentiontags, Nostr.TagAny(["e", Nostr.hex(Nostr.EventId(eid))]))
-                    end
+                    push_parametrized_replaceable_event(r[Bech32.Author], r[Bech32.Kind], r[Bech32.Special])
                 end
             end
         else
@@ -590,7 +604,7 @@ function for_mentiones(body::Function, est::CacheStorage, e::Nostr.Event; pubkey
             end
         end
     end
-    for tag in mentiontags
+    for tag in unique(mentiontags)
         body(tag)
     end
 end

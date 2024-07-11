@@ -12,6 +12,7 @@ import ..Nostr
 using ..Utils: ThreadSafe, Throttle
 
 exposed_functions = Set([:feed,
+                         :feed_2,
                          :thread_view,
                          :network_stats,
                          :contact_list,
@@ -31,6 +32,7 @@ exposed_functions = Set([:feed,
                          :allowlist,
                          :parameterized_replaceable_list,
                          :parametrized_replaceable_event,
+                         :parametrized_replaceable_events,
                          :search_filterlist,
                          :import_events,
                          :zaps_feed,
@@ -43,8 +45,13 @@ exposed_functions = Set([:feed,
                          :user_of_ln_address,
                          :get_user_relays,
                          :get_bookmarks,
+                         :get_highlights,
                          :long_form_content_feed,
                          :long_form_content_thread_view,
+                         :get_recommended_reads,
+                         :get_reads_topics,
+                         :get_featured_authors,
+                         :creator_paid_tiers,
                         ])
 
 exposed_async_functions = Set([:net_stats, 
@@ -74,12 +81,18 @@ USER_PUBKEY=10_000_138
 USER_RELAYS=10_000_139
 EVENT_RELAYS=10_000_141
 LONG_FORM_METADATA=10_000_144
+RECOMMENDED_READS=10_000_145
+READS_TOPICS=10_000_146
+CREATOR_PAID_TIERS=10_000_147
+FEATURED_AUTHORS=10_000_148
 
 cast(value, type) = value isa type ? value : type(value)
 castmaybe(value, type) = (isnothing(value) || ismissing(value)) ? value : cast(value, type)
 
 PRINT_EXCEPTIONS = Ref(false)
 exceptions = CircularBuffer(200)
+
+DAG_OUTPUTS_DB = Ref{Any}(nothing) |> ThreadSafe
 
 function catch_exception(body::Function, args...; rethrow_exception=false, kwargs...)
     try
@@ -96,7 +109,9 @@ function range(res::Vector, order_by; by=r->r[2])
     if isempty(res)
         [(; kind=Int(RANGE), content=JSON.json((; order_by)))]
     else
-        [(; kind=Int(RANGE), content=JSON.json((; since=by(res[end]), until=by(res[1]), order_by)))]
+        since = min(by(res[1]), by(res[end]))
+        until = max(by(res[1]), by(res[end]))
+        [(; kind=Int(RANGE), content=JSON.json((; since, until, order_by)))]
     end
 end
 
@@ -140,21 +155,54 @@ function event_actions_cnt(est::DB.CacheStorage, eid::Nostr.EventId, user_pubkey
     end
 end
 
-function event_actions(est::DB.CacheStorage; event_id, kind::Int, limit=100, offset=0)
+function event_actions(est::DB.CacheStorage; 
+        event_id=nothing,
+        pubkey=nothing, identifier=nothing,
+        kind::Int, 
+        limit=100, offset=0,
+    )
     limit <= 1000 || error("limit too big")
-    event_id = cast(event_id, Nostr.EventId)
+    event_id = castmaybe(event_id, Nostr.EventId)
+    pubkey = castmaybe(pubkey, Nostr.PubKeyId)
+
     res = []
     pks = Set{Nostr.PubKeyId}()
-    for (reid, pk) in DB.exe(est.event_pubkey_action_refs,
-                             DB.@sql("select ref_event_id, ref_pubkey from kv 
-                                     where event_id = ?1 and ref_kind = ?2 
-                                     order by ref_created_at desc
-                                     limit ?3 offset ?4"),
-                             event_id, kind, limit, offset)
+
+    r = if !isnothing(event_id)
+        DB.exe(est.event_pubkey_action_refs, DB.@sql("
+                        select ref_event_id, ref_pubkey from kv 
+                        where event_id = ?1 and ref_kind = ?2 
+                        order by ref_created_at desc
+                        limit ?3 offset ?4"),
+               event_id, kind, limit, offset)
+                        
+    elseif !isnothing(pubkey) && !isnothing(identifier) 
+        Postgres.pex(DAG_OUTPUTS_DB[], pgparams() do P "
+                        SELECT
+                            ref_event_id, 
+                            ref_pubkey
+                        FROM
+                            prod.reads_versions,
+                            prod.event_pubkey_action_refs
+                        WHERE 
+                            reads_versions.pubkey = $(@P pubkey) AND 
+                            reads_versions.identifier = $(@P identifier) AND 
+                            reads_versions.eid = event_pubkey_action_refs.event_id AND
+                            event_pubkey_action_refs.ref_kind = $(@P kind)
+                        ORDER BY
+                            event_pubkey_action_refs.ref_created_at DESC
+                        LIMIT $(@P limit) OFFSET $(@P offset)
+                    " end...)
+    else
+        []
+    end
+
+    for (reid, pk) in r
         push!(pks, Nostr.PubKeyId(pk))
         reid = Nostr.EventId(reid)
         reid in est.events && push!(res, est.events[reid])
     end
+
     [res; user_infos(est; pubkeys=collect(pks))]
 end
 
@@ -295,10 +343,6 @@ end
 
 RELAY_URL_MAP = Dict{String, String}()
 
-import DataStructures
-posts_age_stats = Accumulator{Int, Int}() |> ThreadSafe
-post_stats = Accumulator{Nostr.EventId, Int}() |> ThreadSafe
-
 response_messages_for_posts_cache_periodic = Throttle(; period=300.0)
 response_messages_for_posts_cache = Dict{Tuple{Nostr.EventId, Union{Nothing, Nostr.PubKeyId}}, Any}() |> ThreadSafe
 response_messages_for_posts_res_meta_data_cache = Dict{Nostr.EventId, Any}() |> ThreadSafe
@@ -338,13 +382,6 @@ function response_messages_for_posts_1(
         eid in est.events || return
         e = est.events[eid]
 
-        lock(posts_age_stats) do posts_age_stats
-            posts_age_stats[trunc(Int, (time() - e.created_at)/24/3600)] += 1
-        end
-        lock(post_stats) do post_stats
-            post_stats[eid] += 1
-        end
-
         is_hidden(est, user_pubkey, :content, e.pubkey) && return
         ext_is_hidden(est, e.pubkey) && return
 
@@ -360,7 +397,9 @@ function response_messages_for_posts_1(
         catch _ false end && return
 
         push!(res, wrapfun(e))
-        union!(res, event_stats(est, e.id))
+        union!(res, e.kind == Int(Nostr.LONG_FORM_CONTENT) ? 
+               ext_long_form_event_stats(est, e.id) : 
+               event_stats(est, e.id))
         isnothing(user_pubkey) || union!(res, event_actions_cnt(est, e.id, user_pubkey))
         push!(pks, e.pubkey)
         union!(res, ext_event_response(est, e))
@@ -446,19 +485,12 @@ function response_messages_for_posts_2(
     function handle_event(
             body::Function, eid::Nostr.EventId; 
             wrapfun::Function=identity, 
-            res=OrderedSet(), pks=Set{Nostr.PubKeyId}(), event_relays=Dict{Nostr.EventId, String}())
+            res::OrderedSet, pks::Set{Nostr.PubKeyId}, event_relays::Dict{Nostr.EventId, String})
         ext_is_hidden(est, eid) && return
         eid in est.deleted_events && return
 
         eid in est.events || return
         e = est.events[eid]
-
-        lock(posts_age_stats) do posts_age_stats
-            posts_age_stats[trunc(Int, (time() - e.created_at)/24/3600)] += 1
-        end
-        lock(post_stats) do post_stats
-            post_stats[eid] += 1
-        end
 
         is_hidden(est, user_pubkey, :content, e.pubkey) && return
         ext_is_hidden(est, e.pubkey) && return
@@ -479,14 +511,16 @@ function response_messages_for_posts_2(
         end
 
         push!(res, wrapfun(e))
-        union!(res, event_stats(est, e.id))
+        union!(res, e.kind == Int(Nostr.LONG_FORM_CONTENT) ? 
+               ext_long_form_event_stats(est, e.id) : 
+               event_stats(est, e.id))
         isnothing(user_pubkey) || union!(res, event_actions_cnt(est, e.id, user_pubkey))
         push!(pks, e.pubkey)
         union!(res, ext_event_response(est, e))
         haskey(est.dyn[:event_relay], eid) && (event_relays[eid] = est.dyn[:event_relay][eid])
 
         union!(res, [e for e in event_zaps_by_satszapped(est; event_id=eid, limit=5, user_pubkey)
-                     if e.kind != Int(RANGE)])
+                     if e.kind != Int(RANGE) && e.kind != Int(Nostr.TEXT_NOTE)])
 
         extra_tags = Nostr.Tag[]
         DB.for_mentiones(est, e) do tag
@@ -496,15 +530,13 @@ function response_messages_for_posts_2(
         # @show length(all_tags)
         for tag in all_tags
             tag = tag.fields
-            try
-                if length(tag) >= 2
-                    if tag[1] == "e"
-                        body(Nostr.EventId(tag[2]))
-                    elseif tag[1] == "p"
-                        push!(pks, Nostr.PubKeyId(tag[2]))
-                    end
+            if length(tag) >= 2
+                if tag[1] == "e"
+                    try body(Nostr.EventId(tag[2])) catch _ end
+                elseif tag[1] == "p"
+                    try push!(pks, Nostr.PubKeyId(tag[2])) catch _ end
                 end
-            catch _ end
+            end
         end
     end
 
@@ -526,7 +558,7 @@ function response_messages_for_posts_2(
                 handle_event(subeid; wrapfun=e->(; kind=Int(REFERENCED_EVENT), content=JSON.json(e)), r.res, r.pks, r.event_relays) do subeid
                     yield()
                     time_exceeded() && return
-                    handle_event(subeid; wrapfun=e->(; kind=Int(REFERENCED_EVENT), content=JSON.json(e), r.res, r.pks, r.event_relays)) do _
+                    handle_event(subeid; wrapfun=e->(; kind=Int(REFERENCED_EVENT), content=JSON.json(e)), r.res, r.pks, r.event_relays) do _
                     end
                 end
             end
@@ -537,6 +569,8 @@ function response_messages_for_posts_2(
         union!(r2.pks, r.pks)
         event_relays = union(event_relays, r.event_relays)
     end
+
+    # @show [e.kind for e in collect(r2.res) if occursin("3c88a6fe308d78302599f050cfcbf3dd9c60f11413d690e5a48d8b593392be12", JSON.json(e))]
 
     res_meta_data = res_meta_data |> ThreadSafe
     # @time "pks" 
@@ -574,8 +608,38 @@ function feed(
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
         user_pubkey=nothing,
         time_exceeded=()->false,
+        kwargs...,
+    )
+    feed_2(est; pubkey, notes, include_replies,
+           since, until, limit, offset, order=:desc,
+           user_pubkey, time_exceeded, kwargs...)
+end
+
+function feed_2(
+        est::DB.CacheStorage;
+        pubkey=nothing, notes::Union{Symbol,String}=:follows, include_replies=false,
+        kinds=nothing,
+        since::Union{Nothing,Int}=nothing, until::Union{Nothing,Int}=nothing, limit::Int=20, offset::Int=0, order::Union{Nothing,Symbol,String}=nothing,
+        user_pubkey=nothing,
+        time_exceeded=()->false,
     )
     limit <= 1000 || error("limit too big")
+
+    order = 
+    if !isnothing(order)
+        Symbol(order)
+    elseif !isnothing(until)
+        :desc
+    elseif !isnothing(since)
+        :asc
+    else
+        :desc
+    end
+    order in [:asc, :desc] || error("invalid order")
+
+    since = isnothing(since) ? 0 : since
+    until = isnothing(until) ? trunc(Int, time()) : until
+
     notes = Symbol(notes)
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
@@ -592,22 +656,44 @@ function feed(
         #                                      (since, until, Int(include_replies), limit, offset))))
         # end
     elseif notes == :replies
-        append!(posts, map(Tuple, DB.exe(est.pubkey_events, DB.@sql("select event_id, created_at from kv 
-                                                                    where pubkey = ? and created_at >= ? and created_at <= ? and is_reply = 1
-                                                                    order by created_at desc limit ? offset ?"),
-                                         pubkey, since, until, limit, offset)))
+        append!(posts, map(Tuple, DB.exe(est.pubkey_events, 
+                                         "select event_id, created_at from kv 
+                                         where pubkey = ? and created_at >= ? and created_at <= ? and is_reply = 1
+                                         order by created_at $order limit ? offset ?",
+                           pubkey, since, until, limit, offset)))
     elseif notes == :bookmarks
         if !isempty(local r = get_bookmarks(est; pubkey))
             bm = r[1]
-            bms = []
+            eids = []
             for t in bm.tags
-                if length(t.fields) >= 2 && t.fields[1] == "e" && !isnothing(local eid = try Nostr.EventId(t.fields[2]) catch _ end)
-                    if eid in est.events 
-                        e = est.events[eid]
-                        if eid in est.event_created_at
-                            created_at = est.event_created_at[eid]
-                            push!(bms, (collect(eid.hash), created_at))
+                if length(t.fields) >= 2 
+                    if     t.fields[1] == "e" && !isnothing(local eid = try Nostr.EventId(t.fields[2]) catch _ end)
+                        push!(eids, eid)
+                    elseif t.fields[1] == "a"
+                        try
+                            kind, pk, identifier = map(string, split(t.fields[2], ':'))
+                            kind = parse(Int, kind)
+                            pk = Nostr.PubKeyId(pk)
+                            for (eid,) in DB.exe(est.dyn[:parametrized_replaceable_events], 
+                                                 DB.@sql("select event_id from parametrized_replaceable_events 
+                                                         where pubkey = ? and identifier = ? and kind = ?"), 
+                                                 pk, identifier, kind)
+                                push!(eids, Nostr.EventId(eid))
+                            end
+                        catch ex
+                            println(ex)
                         end
+                    end
+                end
+            end
+            bms = []
+            for eid in eids
+                if eid in est.events 
+                    e = est.events[eid]
+                    !isnothing(kinds) && !(e.kind in kinds) && continue
+                    if eid in est.event_created_at
+                        created_at = est.event_created_at[eid]
+                        push!(bms, (collect(eid.hash), created_at))
                     end
                 end
             end
@@ -620,6 +706,27 @@ function feed(
                 end
             end
         end
+    elseif notes == :user_media_thumbnails
+        if !isnothing(DAG_OUTPUTS_DB[])
+            for (eid, created_at) in Postgres.pex(:p1timelimit, "
+                SELECT
+                    DISTINCT events.id, 
+                    events.created_at
+                FROM
+                    prod.events,
+                    prod.event_media
+                WHERE 
+                    events.pubkey = \$1 AND 
+                    events.kind = $(Int(Nostr.TEXT_NOTE)) AND 
+                    events.id = event_media.event_id AND
+                    events.created_at >= \$2 and events.created_at <= \$3
+                ORDER BY
+                    events.created_at DESC
+                LIMIT \$4 OFFSET \$5
+                ", [pubkey, since, until, limit, offset])
+                push!(posts, (eid, created_at))
+            end
+        end
     else
         pubkeys = 
         if     notes == :follows;  follows(est, pubkey)
@@ -629,7 +736,10 @@ function feed(
         pubkeys = sort(pubkeys)
 
         use_slow_method = Ref(false)
-        if 1==1 && (ng_any_user[] || user_pubkey in ng_whitelist)
+
+        if order == :asc; use_slow_method[] = true; end
+
+        if 1==1 && !use_slow_method[] && (ng_any_user[] || user_pubkey in ng_whitelist)
             ca = 1
             rwlock, ss = est.dyn[:recent_events]
             lock(read_lock(rwlock)) do
@@ -652,10 +762,8 @@ function feed(
                                     if length(posts) >= limit; done = true; break; end
                                 end
                             end
-                            # @show (done, since, until)
                             if !done; use_slow_method[] = true; end
                         catch _ Utils.print_exceptions() end
-                        # @show (since, until, [until-p[2] for p in collect(posts)])
                     end
                 end
             end
@@ -663,26 +771,21 @@ function feed(
 
         if use_slow_method[]
             tdur2 = @elapsed @threads for p in pubkeys
-            # tdur2 = @elapsed for p in pubkeys
                 time_exceeded() && break
                 yield()
-                append!(posts, map(Tuple, DB.exe(est.pubkey_events, DB.@sql("select event_id, created_at from kv 
-                                                                            where pubkey = ? and created_at >= ? and created_at <= ? and (is_reply = 0 or is_reply = ?)
-                                                                            order by created_at desc limit ? offset ?"),
+                append!(posts, map(Tuple, DB.exe(est.pubkey_events, 
+                                                 "select event_id, created_at from kv 
+                                                 where pubkey = ? and created_at >= ? and created_at <= ? and (is_reply = 0 or is_reply = ?)
+                                                 order by created_at $order limit ? offset ?",
                                                  p, since, until, Int(include_replies), limit, offset)))
             end
         end
     end
 
-    posts = first(sort(posts.wrapped, by=p->-p[2]), limit)
+    posts = first(sort(posts.wrapped, by=p->p[2], rev=order!=:asc), limit)
 
     eids = [Nostr.EventId(eid) for (eid, _) in posts]
     tdur3 = @elapsed (res = response_messages_for_posts(est, eids; user_pubkey, time_exceeded))
-
-    # if ng_any_user[] || user_pubkey in ng_whitelist
-    #     # println(:feed, " ", (; pubkey=Nostr.hex(pubkey), since, until, limit, pubkeys=length(pubkeys), events_scanned, tdur1, tdur2, tdur3, posts=length(posts), include_replies)) ##, ressize=length(JSON.json(res))))
-    #     push!(Main.stuff, (:feed_perf, (; limit, posts=length(posts), events_scanned, tdur1, tdur2, tdur3)))
-    # end
 
     vcat(res, range(posts, :created_at))
 end
@@ -693,14 +796,14 @@ function thread_view(est::DB.CacheStorage; event_id, user_pubkey=nothing, kwargs
 
     est.auto_fetch_missing_events && DB.fetch_event(est, event_id)
 
-    res = []
+    res = OrderedSet()
 
     hidden = is_hidden(est, user_pubkey, :content, event_id) || ext_is_hidden(est, event_id) || event_id in est.deleted_events
 
-    hidden || append!(res, thread_view_replies(est; event_id, user_pubkey, kwargs...))
-    append!(res, thread_view_parents(est; event_id, user_pubkey))
+    hidden || union!(res, thread_view_replies(est; event_id, user_pubkey, kwargs...))
+    union!(res, thread_view_parents(est; event_id, user_pubkey))
 
-    res
+    collect(res)
 end
 
 function thread_view_replies(est::DB.CacheStorage;
@@ -747,6 +850,7 @@ function thread_view_parents(est::DB.CacheStorage; event_id, user_pubkey=nothing
     posts = sort(posts, by=p->p[2])
 
     reids = [reid for (reid, _) in posts]
+
     response_messages_for_posts(est, reids; user_pubkey)
 end
 
@@ -915,9 +1019,13 @@ function events(
     end
 end
 
+blocked_user_profiles = Set{Nostr.PubKeyId}() |> ThreadSafe
+
 function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
     pubkey = cast(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    pubkey in blocked_user_profiles && return []
 
     est.auto_fetch_missing_events && DB.fetch_user_metadata(est, pubkey)
 
@@ -927,6 +1035,8 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
 
     note_count  = DB.exe(est.pubkey_events, DB.@sql("select count(1) from kv where pubkey = ? and is_reply = false"), pubkey)[1][1]
     reply_count = DB.exe(est.pubkey_events, DB.@sql("select count(1) from kv where pubkey = ? and is_reply = true"), pubkey)[1][1]
+    long_form_note_count = DB.exe(est.dyn[:parametrized_replaceable_events], DB.@sql("select count(1) from parametrized_replaceable_events where pubkey = ? and kind = ?"), pubkey, Int(Nostr.LONG_FORM_CONTENT))[1][1]
+    # subscribable = any(e.kind == 37001 for e in creator_paid_tiers(est; pubkey))
 
     time_joined_r = DB.exe(est.pubkey_events, DB.@sql("select created_at from kv
                                                        where pubkey = ?
@@ -943,9 +1053,11 @@ function user_profile(est::DB.CacheStorage; pubkey, user_pubkey=nothing)
                                    follows_count=length(follows(est, pubkey)),
                                    followers_count=get(est.pubkey_followers_cnt, pubkey, 0),
                                    note_count,
+                                   long_form_note_count,
                                    reply_count,
                                    time_joined,
                                    relay_count,
+                                   # subscribable,
                                    ext_user_profile(est, pubkey)...,
                                   ))))
 
@@ -986,54 +1098,60 @@ end
 
 function get_directmsg_contacts(
         est::DB.CacheStorage; 
-        user_pubkey, relation::Union{String,Symbol}=:any
+        user_pubkey, relation::Union{String,Symbol}=:any,
+        limit=10000, offset=0, since=0, until=trunc(Int, time()),
     )
+    limit = min(10000, limit)
     user_pubkey = cast(user_pubkey, Nostr.PubKeyId)
     relation = cast(relation, Symbol)
 
     fs = Set(follows(est, user_pubkey))
 
-    d = Dict()
-    evts = []
-    mds = []
-    mdextra = []
+    d = Dict{Nostr.PubKeyId, Dict{Symbol, Any}}()
     for (peer, cnt, latest_at, latest_event_id) in 
         vcat(DB.exe(est.pubkey_directmsgs_cnt,
                     DB.@sql("select sender, cnt, latest_at, latest_event_id
                             from pubkey_directmsgs_cnt
-                            where receiver is ?1 and sender is not null
-                            order by latest_at desc"), user_pubkey),
+                            where receiver is ?1 and sender is not null and latest_at >= ?2 and latest_at <= ?3
+                            order by latest_at desc limit ?4"), user_pubkey, since, until, 300),
              DB.exe(est.pubkey_directmsgs_cnt,
                     DB.@sql("select receiver, 0, latest_at, latest_event_id
                             from pubkey_directmsgs_cnt
-                            where sender is ?1
-                            order by latest_at desc"), user_pubkey))
+                            where sender is ?1 and latest_at >= ?2 and latest_at <= ?3
+                            order by latest_at desc limit ?4"), user_pubkey, since, until, 300))
 
         peer = Nostr.PubKeyId(peer)
 
         is_hidden(est, user_pubkey, :content, peer) && continue
 
         if relation != :any
-            if relation == :follows; peer in fs || continue
-            elseif relation == :other; peer in fs && continue
+            if     relation == :follows; peer in fs || continue
+            elseif relation == :other;   peer in fs && continue
             else; error("invalid relation")
             end
         end
         
         latest_event_id = Nostr.EventId(latest_event_id)
-        k = Nostr.hex(peer) 
-        if !haskey(d, k)
-            d[k] = Dict([:cnt=>cnt, :latest_at=>latest_at, :latest_event_id=>latest_event_id])
+        if !haskey(d, peer)
+            d[peer] = Dict([:cnt=>cnt, :latest_at=>latest_at, :latest_event_id=>latest_event_id])
         end
-        if d[k][:latest_at] < latest_at
-            d[k][:latest_at] = latest_at
-            d[k][:latest_event_id] = latest_event_id
+        if d[peer][:latest_at] < latest_at
+            d[peer][:latest_at] = latest_at
+            d[peer][:latest_event_id] = latest_event_id
         end
-        if d[k][:cnt] < cnt
-            d[k][:cnt] = cnt
+        if d[peer][:cnt] < cnt
+            d[peer][:cnt] = cnt
         end
-        if latest_event_id in est.events
-            push!(evts, est.events[latest_event_id])
+    end
+
+    d = sort(collect(d); by=x->-x[2][:latest_at])[offset+1:min(length(d), offset+limit)]
+
+    evts = []
+    mds = []
+    mdextra = []
+    for (peer, p) in d
+        if p[:latest_event_id] in est.events
+            push!(evts, est.events[p[:latest_event_id]])
         end
         if peer in est.meta_data
             mdeid = est.meta_data[peer]
@@ -1044,7 +1162,12 @@ function get_directmsg_contacts(
             end
         end
     end
-    [(; kind=Int(DIRECTMSG_COUNTS), content=JSON.json(d)), evts..., mds..., mdextra...]
+
+    d = [Nostr.hex(peer)=>p for (peer, p) in d]
+
+    [(; kind=Int(DIRECTMSG_COUNTS), content=JSON.json(Dict(d))), 
+     evts..., mds..., mdextra..., 
+     range(d, :latest_at; by=x->x[2][:latest_at])]
 end
 
 reset_directmsg_count_lock = ReentrantLock()
@@ -1184,6 +1307,7 @@ function parametrized_replaceable_events_extended_response(est::DB.CacheStorage,
     res = []
     res_meta_data = Dict()
     for eid in eids
+        eid in est.events || continue
         e = est.events[eid]
         for tag in e.tags
             if length(tag.fields) == 2 && tag.fields[1] == "p"
@@ -1217,14 +1341,28 @@ function parameterized_replaceable_list(est::DB.CacheStorage; pubkey, identifier
     res
 end
 
-function parametrized_replaceable_event(est::DB.CacheStorage; pubkey, kind::Int, identifier::String, extended_response=true)
+function parametrized_replaceable_event(est::DB.CacheStorage; pubkey, kind::Int, identifier::String, extended_response=true, user_pubkey=nothing)
     pubkey = cast(pubkey, Nostr.PubKeyId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
-    eids = [Nostr.EventId(eid) for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
-                                                     DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3"), 
-                                                     (pubkey, kind, identifier))]
-    res = [est.events[eid] for eid in eids]
-    extended_response && append!(res, parametrized_replaceable_events_extended_response(est, eids))
+    eids = [Nostr.EventId(eid) 
+            for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
+                                  DB.@sql("select event_id from parametrized_replaceable_events 
+                                          where pubkey = ?1 and kind = ?2 and identifier = ?3"), 
+                                  (pubkey, kind, identifier))]
+    res = OrderedSet{Any}([est.events[eid] for eid in eids])
+    if extended_response
+        union!(res, parametrized_replaceable_events_extended_response(est, eids))
+        union!(res, response_messages_for_posts(est, eids; user_pubkey))
+    end
+    collect(res)
+end
+
+function parametrized_replaceable_events(est::DB.CacheStorage; events::Vector, extended_response=true)
+    res = []
+    for r in events
+        append!(res, parametrized_replaceable_event(est; pubkey=r["pubkey"], kind=r["kind"], identifier=r["identifier"], extended_response))
+    end
     res
 end
 
@@ -1408,20 +1546,51 @@ end
 
 function event_zaps_by_satszapped(
         est::DB.CacheStorage;
-        event_id,
+        event_id=nothing,
+        pubkey=nothing, identifier=nothing,
         limit::Int=20, since::Int=0, until=nothing, offset::Int=0,
         user_pubkey=nothing,
     )
     limit <= 1000 || error("limit too big")
-    event_id = cast(event_id, Nostr.EventId)
+    event_id = castmaybe(event_id, Nostr.EventId)
+    pubkey = castmaybe(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
 
     isnothing(until) && (until = 100_000_000_000)
-    zaps = map(Tuple, DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
-                                                        where event_id = ? and amount_sats >= ? and amount_sats <= ?
-                                                        order by amount_sats desc limit ? offset ?"),
-                              (event_id, since, until, limit, offset)))
 
+    r = if !isnothing(event_id)
+        DB.exec(est.zap_receipts, DB.@sql("select zap_receipt_id, created_at, event_id, sender, receiver, amount_sats from zap_receipts 
+                                          where event_id = ? and amount_sats >= ? and amount_sats <= ?
+                                          order by amount_sats desc limit ? offset ?"),
+                (event_id, since, until, limit, offset))
+
+    elseif !isnothing(pubkey) && !isnothing(identifier) 
+        Postgres.pex(DAG_OUTPUTS_DB[], pgparams() do P "
+                      SELECT
+                          zap_receipts.eid        as zap_receipt_id,
+                          zap_receipts.created_at as created_at,
+                          zap_receipts.target_eid as event_id,
+                          zap_receipts.sender     as sender,
+                          zap_receipts.receiver   as receiver,
+                          zap_receipts.satszapped as amount_sats 
+                      FROM
+                          prod.reads_versions,
+                          prod.zap_receipts
+                      WHERE 
+                          reads_versions.pubkey = $(@P pubkey) AND 
+                          reads_versions.identifier = $(@P identifier) AND 
+                          reads_versions.eid = zap_receipts.target_eid AND 
+                          zap_receipts.satszapped >= $(@P since) AND 
+                          zap_receipts.satszapped <= $(@P until)
+                      ORDER BY
+                          zap_receipts.satszapped DESC
+                      LIMIT $(@P limit) OFFSET $(@P offset)
+                  " end...)
+    else
+        []
+    end
+
+    zaps = map(Tuple, r)
     zaps = first(sort(zaps, by=z->-z[6]), limit)
 
     response_messages_for_zaps(est, zaps; order_by=:amount_sats, user_pubkey)
@@ -1516,20 +1685,142 @@ function get_bookmarks(est::DB.CacheStorage; pubkey)
     res
 end
 
+function get_highlights(
+        est::DB.CacheStorage;
+        event_id=nothing,
+        pubkey=nothing, identifier=nothing, kind=nothing,
+        limit::Int=20, since::Int=0, until=trunc(Int, time()), offset::Int=0,
+        user_pubkey=nothing,
+    )
+    event_id = castmaybe(event_id, Nostr.EventId)
+    pubkey = castmaybe(pubkey, Nostr.PubKeyId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
+    event_from_row(r) = Nostr.Event(r[1], r[2], r[3], r[4], [Nostr.TagAny(t) for t in r[5]], ismissing(r[6]) ? "" : r[6], r[7])
+
+    evts = if !isnothing(event_id)
+        map(event_from_row, Postgres.pex(DAG_OUTPUTS_DB[], pgparams() do P "
+                             SELECT
+                                 events.*
+                             FROM
+                                 prod.basic_tags,
+                                 prod.events
+                             WHERE 
+                                 basic_tags.kind = 9802 AND
+                                 basic_tags.tag = 'e' AND
+                                 basic_tags.arg1 = $(@P event_id)
+                                 basic_tags.created_at >= $(@P since) AND 
+                                 basic_tags.created_at <= $(@P until) AND
+                                 basic_tags.eid = events.id
+                             ORDER BY
+                                 basic_tags.created_at DESC
+                             LIMIT $(@P limit) OFFSET $(@P offset)
+                         " end...))
+
+    elseif !isnothing(kind) && !isnothing(pubkey) && !isnothing(identifier) 
+        map(event_from_row, Postgres.pex(DAG_OUTPUTS_DB[], pgparams() do P "
+                             SELECT
+                                 events.*
+                             FROM
+                                 prod.a_tags,
+                                 prod.events
+                             WHERE 
+                                 a_tags.kind = 9802 AND 
+                                 a_tags.ref_kind = $(@P kind) AND 
+                                 a_tags.ref_pubkey = $(@P pubkey) AND 
+                                 a_tags.ref_identifier = $(@P identifier) AND 
+                                 a_tags.created_at >= $(@P since) AND 
+                                 a_tags.created_at <= $(@P until) AND
+                                 a_tags.eid = events.id
+                             ORDER BY
+                                 a_tags.created_at DESC
+                             LIMIT $(@P limit) OFFSET $(@P offset)
+                         " end...))
+    else
+        []
+    end
+
+    evts = [e for e in evts
+            if !(is_hidden(est, user_pubkey, :content, e.id) || 
+                 ext_is_hidden(est, e.id) || 
+                 e.id in est.deleted_events)]
+
+    res = []
+    res_meta_data = Dict()
+    for e in evts
+
+        push!(res, e)
+        pk = e.pubkey
+        if !haskey(res_meta_data, pk) && pk in est.meta_data
+            res_meta_data[pk] = est.events[est.meta_data[pk]]
+        end
+    end
+
+    res_meta_data = collect(values(res_meta_data))
+    append!(res, res_meta_data)
+    append!(res, user_scores(est, res_meta_data))
+    ext_user_infos(est, res, res_meta_data)
+
+    vcat(res, range([(e.id, e.created_at) for e in evts], :created_at))
+end
+
+function pgparams()
+    r = (; params=[], wheres=[])
+    (; r...,
+     clear=function()
+         empty!(r.params)
+         empty!(r.wheres)
+         nothing
+     end,
+     P=function(v)
+         push!(r.params, v)
+         "\$$(length(r.params))"
+     end,
+     W=function(w)
+         push!(r.wheres, w)
+         nothing
+     end,
+     fmtwheres=()->join([" and "*s for s in r.wheres]),
+     )
+end
+
+function pgparams(body)
+    p = pgparams()
+    body(p.P), p.params
+end
+
+macro P(arg)
+    :($(esc(:P))($(esc(arg))))
+end
+
 function long_form_content_feed(
         est::DB.CacheStorage;
         pubkey=nothing, notes::Union{Symbol,String}=:follows,
+        topic=nothing,
         limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
         user_pubkey=nothing,
         time_exceeded=()->false,
     )
     limit <= 1000 || error("limit too big")
-    pubkey = cast(pubkey, Nostr.PubKeyId)
+    pubkey = castmaybe(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+    notes = Symbol(notes)
+
+    topic_where(P) = isnothing(topic) ? "" : "and topics @@ plainto_tsquery('simple', $(@P replace(topic, ' '=>'-')))"
 
     posts = [] |> ThreadSafe
     if pubkey isa Nothing
-        
+        for r in Postgres.pex(DAG_OUTPUTS_DB[], 
+                              pgparams() do P "
+                                  select latest_eid, published_at
+                                  from prod.reads
+                                  where 
+                                      published_at >= $(@P since) and published_at <= $(@P until)
+                                      $(topic_where(P))
+                                  order by published_at desc limit $(@P limit) offset $(@P offset)
+                              " end...)
+            push!(posts, r)
+        end
     else
         pubkeys = 
         if     notes == :follows;  follows(est, pubkey)
@@ -1538,13 +1829,20 @@ function long_form_content_feed(
         end
         pubkeys = sort(pubkeys)
 
-        @threads for p in pubkeys
+        for pk in pubkeys
             time_exceeded() && break
-            append!(posts, map(Tuple, DB.exec(est.dyn[:parametrized_replaceable_events], 
-                                              DB.@sql("select event_id, created_at from parametrized_replaceable_events 
-                                                      where kind = 30023 and pubkey = ? and created_at >= ? and created_at <= ?
-                                                      order by created_at desc limit ? offset ?"),
-                                              (p, since, until, limit, offset))))
+            for r in Postgres.pex(DAG_OUTPUTS_DB[],
+                                  pgparams() do P "
+                                      select latest_eid, published_at
+                                      from prod.reads
+                                      where 
+                                          published_at >= $(@P since) and published_at <= $(@P until)
+                                          and pubkey = $(@P pk) 
+                                          $(topic_where(P))
+                                      order by published_at desc limit $(@P limit) offset $(@P offset)
+                                  " end...)
+                push!(posts, r)
+            end
         end
     end
 
@@ -1553,12 +1851,124 @@ function long_form_content_feed(
     eids = [Nostr.EventId(eid) for (eid, _) in posts]
     res = response_messages_for_posts_2(est, eids; user_pubkey, time_exceeded)
 
+    append!(res, parametrized_replaceable_events_extended_response(est, eids))
+
     vcat(res, range(posts, :created_at))
 end
 
-function long_form_content_thread_view(est::DB.CacheStorage; pubkey, kind::Int, identifier::String, kwargs...)
+function long_form_content_thread_view(
+        est::DB.CacheStorage; 
+        pubkey, kind::Int, identifier::String, 
+        limit::Int=20, since::Int=0, until::Int=trunc(Int, time()), offset::Int=0,
+        user_pubkey=nothing,
+    )
+    limit <= 1000 || error("limit too big")
+    pubkey = castmaybe(pubkey, Nostr.PubKeyId)
+    user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
+
     event_id = parametrized_replaceable_event(est; pubkey, kind, identifier, extended_response=false)[1].id
-    thread_view(est; event_id, kwargs...)
+
+    res = OrderedSet()
+
+    hidden = is_hidden(est, user_pubkey, :content, event_id) || ext_is_hidden(est, event_id) || event_id in est.deleted_events
+    hidden && return []
+
+    union!(res, thread_view_parents(est; event_id, user_pubkey))
+
+    posts = Tuple{Nostr.EventId, Int}[]
+
+    for (reid, created_at) in 
+        Postgres.pex(DAG_OUTPUTS_DB[], pgparams() do P "
+                         WITH a AS (
+                             SELECT
+                                 events.id,
+                                 events.created_at
+                             FROM
+                                 prod.reads_versions,
+                                 prod.event_replies,
+                                 prod.events
+                             WHERE 
+                                 reads_versions.pubkey = $(@P pubkey) AND 
+                                 reads_versions.identifier = $(@P identifier) AND 
+                                 reads_versions.eid = event_replies.event_id AND 
+                                 event_replies.reply_event_id = events.id AND 
+                                 events.created_at >= $(@P since) AND 
+                                 events.created_at <= $(@P until)
+                         ), b AS (
+                             SELECT
+                                 a_tags.eid,
+                                 a_tags.created_at
+                             FROM
+                                 prod.a_tags
+                             WHERE 
+                                 a_tags.kind = $(@P Int(Nostr.TEXT_NOTE)) AND 
+                                 a_tags.ref_kind = $(@P Int(Nostr.LONG_FORM_CONTENT)) AND 
+                                 a_tags.ref_pubkey = $(@P pubkey) AND 
+                                 a_tags.ref_identifier = $(@P identifier) AND 
+                                 a_tags.created_at >= $(@P since) AND 
+                                 a_tags.created_at <= $(@P until)
+                         )
+                         (SELECT * FROM a) UNION (SELECT * FROM b)
+                         ORDER BY
+                             created_at DESC
+                         LIMIT $(@P limit) OFFSET $(@P offset)
+                     " end...)
+        push!(posts, (Nostr.EventId(reid), created_at))
+    end
+    
+    reids = [reid for (reid, _) in posts]
+    union!(res, [response_messages_for_posts(est, reids; user_pubkey); range(posts, :created_at)])
+
+    collect(res)
+end
+
+RECOMMENDED_READS_FILE = Ref("recommended-reads.json")
+
+function get_recommended_reads(est::DB.CacheStorage)
+    [(; kind=Int(RECOMMENDED_READS), 
+      content=JSON.json(try JSON.parse(read(RECOMMENDED_READS_FILE[], String))
+                        catch _; (;) end))]
+end
+
+READS_TOPICS_FILE = Ref("reads-topics.json")
+
+function get_reads_topics(est::DB.CacheStorage)
+    [(; kind=Int(READS_TOPICS), 
+      content=JSON.json(try JSON.parse(read(READS_TOPICS_FILE[], String))
+                        catch _; (;) end))]
+end
+
+FEATURED_AUTHORS_FILE = Ref("featured-authors.json")
+
+function get_featured_authors(est::DB.CacheStorage)
+    [(; kind=Int(FEATURED_AUTHORS), 
+      content=JSON.json(try JSON.parse(read(FEATURED_AUTHORS_FILE[], String))
+                        catch _; (;) end))]
+end
+
+function creator_paid_tiers(est::DB.CacheStorage; pubkey)
+    pubkey = cast(pubkey, Nostr.PubKeyId)
+
+    res = []
+
+    catch_exception(:creator_paid_tiers, (; pubkey)) do
+        event_from_row(r) = Nostr.Event(r[1], r[2], r[3], r[4], [Nostr.TagAny(t) for t in r[5]], ismissing(r[6]) ? "" : r[6], r[7])
+
+        for r in Main.Postgres.pex(:p1, "select * from event where kind = 17000 and pubkey = ?1 order by created_at desc limit 1", (pubkey,))
+            e = event_from_row(r)
+            push!(res, e)
+            for t in e.tags
+                if length(t.fields) >= 2 && t.fields[1] == "e"
+                    eid = Nostr.EventId(t.fields[2])
+                    for r2 in Main.Postgres.pex(:p1, "select * from event where id = ?1 limit 1", (eid,))
+                        push!(res, event_from_row(r2))
+                    end
+                end
+            end
+        end
+    end
+
+    res
 end
 
 function ext_user_infos(est::DB.CacheStorage, res, res_meta_data) end
@@ -1571,5 +1981,6 @@ function ext_event_response(est::DB.CacheStorage, e::Nostr.Event); []; end
 function ext_user_get_settings(est::DB.CacheStorage, pubkey); end
 function ext_invalidate_cached_content_moderation(est::DB.CacheStorage, user_pubkey::Union{Nothing,Nostr.PubKeyId}); end
 function ext_import_event(est::DB.CacheStorage, e::Nostr.Event) end
+function ext_long_form_event_stats(est::DB.CacheStorage, eid::Nostr.EventId); []; end
 
 end
