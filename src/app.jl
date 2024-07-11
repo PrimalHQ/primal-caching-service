@@ -2,6 +2,7 @@ module App
 
 import JSON
 using .Threads: @threads
+import DataStructures
 using DataStructures: OrderedSet, CircularBuffer, Accumulator
 using ReadWriteLocks: read_lock
 import Sockets
@@ -10,6 +11,7 @@ import Dates
 import ..DB
 import ..Nostr
 using ..Utils: ThreadSafe, Throttle
+using ..Postgres: @P, pgparams
 
 exposed_functions = Set([:feed,
                          :feed_2,
@@ -1763,35 +1765,6 @@ function get_highlights(
     ext_user_infos(est, res, res_meta_data)
 
     vcat(res, range([(e.id, e.created_at) for e in evts], :created_at))
-end
-
-function pgparams()
-    r = (; params=[], wheres=[])
-    (; r...,
-     clear=function()
-         empty!(r.params)
-         empty!(r.wheres)
-         nothing
-     end,
-     P=function(v)
-         push!(r.params, v)
-         "\$$(length(r.params))"
-     end,
-     W=function(w)
-         push!(r.wheres, w)
-         nothing
-     end,
-     fmtwheres=()->join([" and "*s for s in r.wheres]),
-     )
-end
-
-function pgparams(body)
-    p = pgparams()
-    body(p.P), p.params
-end
-
-macro P(arg)
-    :($(esc(:P))($(esc(arg))))
 end
 
 function long_form_content_feed(
