@@ -1113,7 +1113,7 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
                 est.dyn[:bookmarks][e.pubkey] = e.id
             end
         elseif e.kind == Int(Nostr.LONG_FORM_CONTENT)
-            ext_text_note(est, e)
+            ext_long_form_note(est, e)
         end
     end
 
@@ -1661,6 +1661,7 @@ function ext_new_follow(est::CacheStorage, e, follow_pubkey) end
 function ext_user_unfollowed(est::CacheStorage, e, follow_pubkey) end
 function ext_reaction(est::CacheStorage, e, eid) end
 function ext_text_note(est::CacheStorage, e) end
+function ext_long_form_note(est::CacheStorage, e) end
 function ext_reply(est::CacheStorage, e, parent_eid) end
 function ext_event_deletion(est::CacheStorage, e, eid) end
 function ext_repost(est::CacheStorage, e, eid) end
