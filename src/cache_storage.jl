@@ -1367,14 +1367,7 @@ function periodic(est::CacheStorage)
     run_scheduled_hooks(est)
 end
 
-function import_to_storage(
-        est::EventStorage, src_dirs::Vector{String};
-        running=Ref(true)|>ThreadSafe, files_newer_than::Real=0,
-        max_threads=Threads.nthreads())
-    init(est, running)
-
-    empty!(threadprogress)
-
+function find_message_logs(src_dirs::Vector{String}; files_newer_than::Real=0)
     fns = []
     for src_dir in src_dirs
         for (dir, _, fs) in walkdir(src_dir)
@@ -1386,7 +1379,18 @@ function import_to_storage(
             end
         end
     end
-    fns = sort(fns)
+    sort(fns)
+end
+
+function import_to_storage(
+        est::EventStorage, src_dirs::Vector{String};
+        running=Ref(true)|>ThreadSafe, files_newer_than::Real=0,
+        max_threads=Threads.nthreads())
+    init(est, running)
+
+    empty!(threadprogress)
+
+    fns = find_message_logs(src_dirs; files_newer_than)
 
     fnpos = []
     chunksize = 100_000_000
@@ -1634,7 +1638,7 @@ function import_messages(est::CacheStorage, filename::String; pos=0, cond=e->tru
     (; total=total[], cond=condcnt[], imported=imported[], kindstats)
 end
 
-function iterate_events_in_file(body::Function, filename::String; pos=0, cond=e->true, running=Utils.PressEnterToStop())
+function iterate_events_in_file(body::Function, filename::String; pos=0, cond=e->true, running=Utils.PressEnterToStop(), silent=false)
     total = Ref(0)
     condcnt = Ref(0)
     open(filename) do f
@@ -1644,7 +1648,6 @@ function iterate_events_in_file(body::Function, filename::String; pos=0, cond=e-
         end
         while !eof(f)
             running[] || break
-            yield()
             msg = readline(f)
             try
                 d = JSON.parse(msg)
@@ -1657,7 +1660,8 @@ function iterate_events_in_file(body::Function, filename::String; pos=0, cond=e-
                 end
                 total[] += 1
                 if total[] % 1000 == 0
-                    print("total: $(total[])  cond: $(condcnt[])\r")
+                    yield()
+                    !silent && print("total: $(total[])  cond: $(condcnt[])\r")
                 end
             catch ex
                 println(ex)

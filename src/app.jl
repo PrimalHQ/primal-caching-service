@@ -485,7 +485,8 @@ function response_messages_for_posts_2(
     function handle_event(
             body::Function, eid::Nostr.EventId; 
             wrapfun::Function=identity, 
-            res::OrderedSet, pks::Set{Nostr.PubKeyId}, event_relays::Dict{Nostr.EventId, String})
+            res::OrderedSet, pks::Set{Nostr.PubKeyId}, event_relays::Dict{Nostr.EventId, String},
+        )
         ext_is_hidden(est, eid) && return
         eid in est.deleted_events && return
 
@@ -527,7 +528,6 @@ function response_messages_for_posts_2(
             push!(extra_tags, tag)
         end
         all_tags = vcat(e.tags, extra_tags)
-        # @show length(all_tags)
         for tag in all_tags
             tag = tag.fields
             if length(tag) >= 2
@@ -562,6 +562,7 @@ function response_messages_for_posts_2(
                     end
                 end
             end
+
             response_messages_for_posts_cache[(eid, user_pubkey)] = r
         end
 

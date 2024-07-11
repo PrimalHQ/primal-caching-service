@@ -298,6 +298,7 @@ struct PressEnterToStop
     end
 end
 Base.getindex(pets::PressEnterToStop) = pets.running[]
+Base.setindex!(pets::PressEnterToStop, v::Bool) = (pets.running[] = v)
 
 isfull(chan::Channel) = length(chan.data) >= chan.sz_max
 
@@ -359,6 +360,7 @@ Base.iterate(dyn::Dyn) = iterate(dyn._data)
 Base.iterate(dyn::Dyn, i::Int) = iterate(dyn._data, i)
 Base.merge!(dyn::Dyn, v) = merge!(dyn._data, v)
 Base.merge!(dyn::Dyn, v::NamedTuple) = merge!(dyn._data, pairs(v))
+Base.collect(dyn::Dyn) = collect(dyn._data)
 
 function process_collection(
         body::Function,
@@ -394,5 +396,7 @@ function process_collection(
     end
     (; running, errors, error_kinds)
 end
+
+current_time() = trunc(Int, time())
 
 end
