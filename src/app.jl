@@ -492,8 +492,13 @@ function response_messages_for_posts_2(
         ext_is_hidden(est, eid) && return
         eid in est.deleted_events && return
 
-        eid in est.events || return
-        e = est.events[eid]
+        e = if eid in est.events
+            est.events[eid]
+        elseif !isempty(local r = Postgres.execute(:p1, "select * from events where id = \$1 limit 1", [eid])[2])
+            event_from_row(r[1])
+        else
+            return
+        end
 
         is_hidden(est, user_pubkey, :content, e.pubkey) && return
         ext_is_hidden(est, e.pubkey) && return
@@ -1688,6 +1693,8 @@ function get_bookmarks(est::DB.CacheStorage; pubkey)
     res
 end
 
+event_from_row(r) = Nostr.Event(r[1], r[2], r[3], r[4], [Nostr.TagAny(t) for t in r[5]], ismissing(r[6]) ? "" : r[6], r[7])
+
 function get_highlights(
         est::DB.CacheStorage;
         event_id=nothing,
@@ -1698,8 +1705,6 @@ function get_highlights(
     event_id = castmaybe(event_id, Nostr.EventId)
     pubkey = castmaybe(pubkey, Nostr.PubKeyId)
     user_pubkey = castmaybe(user_pubkey, Nostr.PubKeyId)
-
-    event_from_row(r) = Nostr.Event(r[1], r[2], r[3], r[4], [Nostr.TagAny(t) for t in r[5]], ismissing(r[6]) ? "" : r[6], r[7])
 
     evts = if !isnothing(event_id)
         map(event_from_row, Postgres.pex(DAG_OUTPUTS_DB[], pgparams() do P "
