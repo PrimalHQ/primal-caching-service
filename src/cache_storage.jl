@@ -968,26 +968,47 @@ function import_msg_into_storage(msg::String, est::CacheStorage; force=false, di
 
             ext_text_note(est, e)
 
+            function parse_eid(tag)
+                if length(tag.fields) >= 4 
+                    if     tag.fields[1] == "e"
+                        return (try Nostr.EventId(tag.fields[2]) catch _ end)
+                    elseif tag.fields[1] == "a" 
+                        kind, pk, identifier = map(string, split(tag.fields[2], ':'))
+                        kind = parse(Int, kind)
+                        pk = Nostr.PubKeyId(pk)
+                        for (eid,) in exec(est.dyn[:parametrized_replaceable_events], 
+                                           @sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                                           (pk, kind, identifier))
+                            return Nostr.EventId(eid)
+                        end
+                    end
+                end
+                nothing
+            end
+
             parent_eid = nothing
             for tag in e.tags
-                if length(tag.fields) >= 4 && tag.fields[1] == "e" && tag.fields[4] == "reply"
-                    if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
-                        parent_eid = eid
+                if length(tag.fields) >= 4 && tag.fields[4] == "reply"
+                    reid = parse_eid(tag)
+                    if !isnothing(reid)
+                        parent_eid = reid
                     end
                 end
             end
             isnothing(parent_eid) && for tag in e.tags
-                if length(tag.fields) >= 4 && tag.fields[1] == "e" && tag.fields[4] == "root"
-                    if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
-                        parent_eid = eid
+                if length(tag.fields) >= 4 && tag.fields[4] == "root"
+                    reid = parse_eid(tag)
+                    if !isnothing(reid)
+                        parent_eid = reid
                         break
                     end
                 end
             end
             isnothing(parent_eid) && for tag in e.tags
-                if length(tag.fields) >= 2 && tag.fields[1] == "e" && (length(tag.fields) < 4 || tag.fields[4] != "mention")
-                    if !isnothing(local eid = try Nostr.EventId(tag.fields[2]) catch _ end)
-                        parent_eid = eid
+                if length(tag.fields) >= 2 && (tag.fields[1] == "e" || tag.fields[1] == "a") && (length(tag.fields) < 4 || tag.fields[4] != "mention")
+                    reid = parse_eid(tag)
+                    if !isnothing(reid)
+                        parent_eid = reid
                     end
                 end
             end

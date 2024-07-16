@@ -12,6 +12,7 @@ import ..DB
 import ..Nostr
 using ..Utils: ThreadSafe, Throttle
 using ..Postgres: @P, pgparams
+import ..Bech32
 
 exposed_functions = Set([:feed,
                          :feed_2,
@@ -542,6 +543,15 @@ function response_messages_for_posts_2(
                     try body(Nostr.EventId(tag[2])) catch _ end
                 elseif tag[1] == "p"
                     try push!(pks, Nostr.PubKeyId(tag[2])) catch _ end
+                elseif tag[1] == "a" 
+                    kind, pk, identifier = map(string, split(tag[2], ':'))
+                    kind = parse(Int, kind)
+                    pk = Nostr.PubKeyId(pk)
+                    for (eid,) in DB.exec(est.dyn[:parametrized_replaceable_events], 
+                                          DB.@sql("select event_id from parametrized_replaceable_events where pubkey = ?1 and kind = ?2 and identifier = ?3 limit 1"), 
+                                          (pk, kind, identifier))
+                        body(Nostr.EventId(eid))
+                    end
                 end
             end
         end
@@ -1860,19 +1870,17 @@ function long_form_content_thread_view(
         Postgres.pex(DAG_OUTPUTS_DB[], pgparams() do P "
                          WITH a AS (
                              SELECT
-                                 events.id,
-                                 events.created_at
+                                 event_replies.reply_event_id,
+                                 event_replies.reply_created_at AS created_at
                              FROM
                                  prod.reads_versions,
-                                 prod.event_replies,
-                                 prod.events
+                                 prod.event_replies
                              WHERE 
                                  reads_versions.pubkey = $(@P pubkey) AND 
                                  reads_versions.identifier = $(@P identifier) AND 
                                  reads_versions.eid = event_replies.event_id AND 
-                                 event_replies.reply_event_id = events.id AND 
-                                 events.created_at >= $(@P since) AND 
-                                 events.created_at <= $(@P until)
+                                 event_replies.reply_created_at >= $(@P since) AND 
+                                 event_replies.reply_created_at <= $(@P until)
                          ), b AS (
                              SELECT
                                  a_tags.eid,
